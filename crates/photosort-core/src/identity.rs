@@ -115,7 +115,16 @@ fn unescape(field: &str) -> Result<String, IdentityParseError> {
     Ok(out)
 }
 
+/// An unsigned decimal exactly as `Display` writes it: ASCII digits only, and
+/// no leading zero unless the value is `0`. `str::parse` alone would accept
+/// `+5` and `005`, which would give two strings for one key.
 fn number<T: FromStr>(text: &str, field: &'static str) -> Result<T, IdentityParseError> {
+    let canonical = !text.is_empty()
+        && text.bytes().all(|b| b.is_ascii_digit())
+        && (text == "0" || !text.starts_with('0'));
+    if !canonical {
+        return Err(IdentityParseError::BadNumber { field });
+    }
     text.parse()
         .map_err(|_| IdentityParseError::BadNumber { field })
 }
@@ -644,6 +653,62 @@ mod tests {
         assert_eq!(
             "cap|a|b|c|d|800|1-250".parse::<IdentityKey>(),
             Err(IdentityParseError::BadNumber { field: "exposure" })
+        );
+    }
+
+    /// `Display` never writes a sign or a leading zero, and `FromStr` must not
+    /// accept either, or two strings would name one key.
+    #[test]
+    fn from_str_rejects_signed_and_zero_padded_numbers() {
+        let digest = "0".repeat(64);
+        for text in ["+5", "005", "-5", "00", ""] {
+            assert_eq!(
+                format!("cnt|{text}|{digest}").parse::<IdentityKey>(),
+                Err(IdentityParseError::BadNumber { field: "size" }),
+                "size {text:?}"
+            );
+            assert_eq!(
+                format!("ctr|a|b|{text}|c|d").parse::<IdentityKey>(),
+                Err(IdentityParseError::BadNumber { field: "counter" }),
+                "counter {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_str_rejects_signed_and_zero_padded_capture_fields() {
+        for iso in ["+800", "0800"] {
+            assert_eq!(
+                format!("cap|a|b|c|d|{iso}|1/250").parse::<IdentityKey>(),
+                Err(IdentityParseError::BadNumber { field: "iso" }),
+                "iso {iso:?}"
+            );
+        }
+        for exposure in ["+1/250", "01/250", "1/+250", "1/0250"] {
+            assert_eq!(
+                format!("cap|a|b|c|d|800|{exposure}").parse::<IdentityKey>(),
+                Err(IdentityParseError::BadNumber { field: "exposure" }),
+                "exposure {exposure:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_str_accepts_zero_as_a_canonical_number() {
+        assert!(
+            format!("cnt|0|{}", "0".repeat(64))
+                .parse::<IdentityKey>()
+                .is_ok()
+        );
+        assert_eq!(
+            "ctr|a|b|0|c|d".parse::<IdentityKey>(),
+            Ok(IdentityKey::Counter {
+                make: "a".to_owned(),
+                serial: "b".to_owned(),
+                counter: 0,
+                dto: "c".to_owned(),
+                subsec: "d".to_owned(),
+            })
         );
     }
 

@@ -12,6 +12,11 @@ mod cache;
     not(test),
     expect(dead_code, reason = "wired into the scanner in Task 6")
 )]
+mod preview;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired into the scanner in Task 6")
+)]
 mod scan_queue;
 
 use eframe::egui;

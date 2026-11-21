@@ -86,41 +86,54 @@ struct Segments {
 fn walk_segments(input: &ParseInput<'_>) -> Result<Segments, ParseError> {
     let mut segments = Segments::default();
     let mut pos: u64 = 2;
+    // Every position used below was either read by `byte_at` or
+    // `segment_length`, which succeeded, or is one of those reads' ends.
+    // Arithmetic on those positions therefore stays within `head` plus at
+    // most one segment length (65,535 bytes), so no u64 sum can overflow.
     for _ in 0..MAX_SEGMENTS {
         if byte_at(input, pos)? != 0xFF {
             return Err(ParseError::Malformed {
                 what: "jpeg marker",
             });
         }
+        // `byte_at(pos)` succeeded, so `pos` is inside `head`.
         let mut code_at = pos + 1;
         let mut code = byte_at(input, code_at)?;
         while code == 0xFF {
+            // The previous `byte_at(code_at)` read a 0xFF, so `code_at` is inside `head`.
             code_at += 1;
             code = byte_at(input, code_at)?;
         }
         if code == SOS || code == EOI {
             return Ok(segments);
         }
+        // `code_at` was read by `byte_at`, so `code_at + 1` cannot overflow.
         let length_at = code_at + 1;
         if code == 0x01 || (0xD0..=0xD7).contains(&code) {
             pos = length_at;
             continue;
         }
         let len = segment_length(input, length_at)?;
+        // `segment_length` read the two bytes at `length_at`, so `length_at + 2` is at most `head.len()`.
         let payload = length_at + 2;
+        // `segment_length` rejects `len < 2`, so the subtraction cannot underflow.
         let payload_len = u64::from(len) - 2;
         if code == APP1
             && segments.exif_base.is_none()
             && has_prefix(input, payload, payload_len, b"Exif\0\0")?
         {
+            // `has_prefix` returned true, so it read the six bytes at `payload`.
             segments.exif_base = Some(payload + 6);
         }
         if code == APP2
             && segments.mpf_base.is_none()
             && has_prefix(input, payload, payload_len, b"MPF\0")?
         {
+            // `has_prefix` returned true, so it read the four bytes at `payload`.
             segments.mpf_base = Some(payload + 4);
         }
+        // `length_at + 2` is inside `head` and `len` is at most 65,535, so this
+        // is at most `head.len() + 65,533`. The next `byte_at` checks it.
         pos = length_at + u64::from(len);
     }
     Ok(segments)

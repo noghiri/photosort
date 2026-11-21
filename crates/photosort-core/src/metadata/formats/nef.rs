@@ -92,7 +92,9 @@ mod tests {
     use crate::metadata::registry::MakerNoteReader;
     use crate::metadata::test_support::{decoded_size, expected_zf, slice};
     use crate::metadata::tiff::{TIFF_MAGIC, Tiff};
-    use photosort_testkit::{ExifSpec, NikonSpec, Order, nef_file, tiny_jpeg};
+    use photosort_testkit::{
+        ExifSpec, IfdBuilder, NikonSpec, Order, nef_file, tiny_jpeg, write_tiff,
+    };
 
     fn parse_with_nikon(file: &[u8], head_len: usize) -> Result<Metadata, ParseError> {
         let makernotes: Vec<Box<dyn MakerNoteReader>> = vec![Box::new(NikonMakerNotes)];
@@ -204,6 +206,77 @@ mod tests {
     fn nef_without_sub_ifd_jpeg_or_maker_note_has_no_vendor_or_raw_jpeg() {
         let file = nef_file(Order::Big, &ExifSpec::zf(), None, None, 0);
         assert_eq!(read_nef(&file), expected_zf());
+    }
+
+    /// A little-endian TIFF whose IFD0 and one SubIFD each hold an optional
+    /// 0x0201/0x0202 JPEG pair. The SubIFD is always present, so a missing
+    /// JPEG there is a missing candidate, not a missing structure.
+    fn jpeg_candidates(ifd0_jpeg: Option<&[u8]>, sub_jpeg: Option<&[u8]>) -> Vec<u8> {
+        let mut ifd0 = IfdBuilder::new();
+        if let Some(jpg) = ifd0_jpeg {
+            ifd0 = ifd0.blob_offset(0x0201, jpg).blob_len(0x0202, jpg);
+        }
+        let mut sub = IfdBuilder::new();
+        if let Some(jpg) = sub_jpeg {
+            sub = sub.blob_offset(0x0201, jpg).blob_len(0x0202, jpg);
+        }
+        let ifd0 = ifd0.children(0x014A, vec![sub]);
+        write_tiff(Order::Little, TIFF_MAGIC, &ifd0, 0).bytes
+    }
+
+    /// `full_jpeg` of a TIFF built by `jpeg_candidates`, with `preview` excluded.
+    fn full_jpeg_of(file: &[u8], preview: Option<ByteRange>) -> Option<ByteRange> {
+        let len = u64::try_from(file.len()).unwrap();
+        let (tiff, ifd0_at) = Tiff::parse(file, len, 0, &[TIFF_MAGIC]).unwrap();
+        let ifd0 = tiff.read_ifd(ifd0_at).unwrap();
+        full_jpeg(&tiff, &ifd0, preview).unwrap()
+    }
+
+    /// Where the bytes of `blob` sit in `file`.
+    fn range_of(file: &[u8], blob: &[u8]) -> ByteRange {
+        let offset = file
+            .windows(blob.len())
+            .position(|w| w == blob)
+            .expect("blob is written");
+        ByteRange {
+            offset: u64::try_from(offset).unwrap(),
+            len: u64::try_from(blob.len()).unwrap(),
+        }
+    }
+
+    #[test]
+    fn larger_jpeg_in_a_subifd_beats_a_smaller_one_in_ifd0() {
+        let small = tiny_jpeg(160, 120);
+        let big = tiny_jpeg(1200, 800);
+        let file = jpeg_candidates(Some(&small), Some(&big));
+        let chosen = full_jpeg_of(&file, None).expect("a candidate is chosen");
+        assert_eq!(chosen, range_of(&file, &big));
+        assert_eq!(decoded_size(slice(&file, chosen)), (1200, 800));
+    }
+
+    #[test]
+    fn larger_jpeg_in_ifd0_beats_a_smaller_one_in_a_subifd() {
+        let big = tiny_jpeg(1200, 800);
+        let small = tiny_jpeg(160, 120);
+        let file = jpeg_candidates(Some(&big), Some(&small));
+        assert_eq!(full_jpeg_of(&file, None), Some(range_of(&file, &big)));
+    }
+
+    #[test]
+    fn candidate_equal_to_the_preview_range_is_excluded() {
+        let small = tiny_jpeg(160, 120);
+        let big = tiny_jpeg(1200, 800);
+        let file = jpeg_candidates(Some(&small), Some(&big));
+        // The larger SubIFD JPEG is the preview, so the smaller IFD0 JPEG wins.
+        let chosen = full_jpeg_of(&file, Some(range_of(&file, &big)));
+        assert_eq!(chosen, Some(range_of(&file, &small)));
+    }
+
+    #[test]
+    fn preview_as_the_only_candidate_leaves_no_full_jpeg() {
+        let big = tiny_jpeg(1200, 800);
+        let file = jpeg_candidates(None, Some(&big));
+        assert_eq!(full_jpeg_of(&file, Some(range_of(&file, &big))), None);
     }
 
     /// Writes `value` into the value field of `tag` in the ExifIFD of a

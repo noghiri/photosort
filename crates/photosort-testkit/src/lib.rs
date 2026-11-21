@@ -10,3 +10,6 @@ mod tiff_writer;
 
 pub use files::*;
 pub use spec::*;
+/// Builds arbitrary TIFF layouts for tests that need a shape the fixed
+/// builders do not produce, such as several candidate JPEGs.
+pub use tiff_writer::{IfdBuilder, write_tiff};

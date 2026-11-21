@@ -119,7 +119,7 @@ fn vendor_fields(
 mod tests {
     use super::*;
     use crate::metadata::registry::MakerNoteReader;
-    use crate::model::Rational;
+    use crate::metadata::test_support::expected_zf;
     use photosort_testkit::{ExifSpec, NikonSpec, Order, tiff_file};
 
     fn read(file: &[u8], makernotes: &[Box<dyn MakerNoteReader>]) -> Result<Metadata, ParseError> {
@@ -129,24 +129,6 @@ mod tests {
             makernotes,
         };
         read_tiff_exif(&input, 0, &[42]).map(|f| f.meta)
-    }
-
-    fn expected_zf() -> Metadata {
-        Metadata {
-            make: Some("NIKON CORPORATION".to_owned()),
-            model: Some("NIKON Z f".to_owned()),
-            serial: Some("1234567".to_owned()),
-            date_time_original: Some("2026:11:20 14:59:32".to_owned()),
-            subsec_time_original: Some("92".to_owned()),
-            iso: Some(800),
-            exposure_time: Some(Rational { num: 1, den: 250 }),
-            f_number: Some(Rational { num: 28, den: 10 }),
-            focal_length: Some(Rational { num: 50, den: 1 }),
-            lens_make: Some("NIKON".to_owned()),
-            lens_model: Some("NIKKOR Z 50mm f/1.8 S".to_owned()),
-            orientation: Some(1),
-            ..Metadata::default()
-        }
     }
 
     #[test]

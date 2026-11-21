@@ -65,7 +65,8 @@ mod tests {
     use super::*;
     use crate::metadata::exif::read_tiff_exif;
     use crate::metadata::registry::ParseInput;
-    use crate::model::{ByteRange, Metadata};
+    use crate::metadata::test_support::{decoded_size, slice};
+    use crate::model::Metadata;
     use photosort_testkit::{ExifSpec, NikonSpec, Order, nef_file, tiny_jpeg};
 
     fn read_nef(file: &[u8]) -> Metadata {
@@ -76,17 +77,6 @@ mod tests {
             makernotes: &makernotes,
         };
         read_tiff_exif(&input, 0, &[42]).unwrap().meta
-    }
-
-    fn slice(file: &[u8], range: ByteRange) -> &[u8] {
-        let start = usize::try_from(range.offset).unwrap();
-        let end = usize::try_from(range.end()).unwrap();
-        file.get(start..end).expect("range lies inside the file")
-    }
-
-    fn decoded_size(bytes: &[u8]) -> (u32, u32) {
-        let img = image::load_from_memory(bytes).expect("preview decodes");
-        (img.width(), img.height())
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! extension) and maker-note readers (by EXIF Make).
 // pattern: Functional Core
 
+use crate::metadata::formats::jpeg::JpegReader;
 use crate::metadata::makernotes::nikon::NikonMakerNotes;
 use crate::metadata::tiff::ByteOrder;
 use crate::model::{ByteRange, FileKind, Metadata, ParseError};
@@ -84,11 +85,13 @@ impl Registry {
         Self::default()
     }
 
-    /// Holds the built-in readers: `NikonMakerNotes` so far. The JPEG and
-    /// NEF format readers are registered when they land.
+    /// Holds the built-in readers: `JpegReader` and `NikonMakerNotes`. The
+    /// NEF format reader is registered when it lands.
     #[must_use]
     pub fn with_builtin() -> Self {
         let mut reg = Self::empty();
+        reg.register_format(Box::new(JpegReader))
+            .expect("built-in readers have distinct kinds and extensions");
         reg.register_makernote(Box::new(NikonMakerNotes));
         reg
     }
@@ -288,5 +291,16 @@ mod tests {
             makernotes: &reg.makernotes,
         };
         assert!(input.makernote_for("NIKON CORPORATION").is_some());
+    }
+
+    #[test]
+    fn with_builtin_finds_jpeg_by_extension_in_any_case() {
+        let reg = Registry::with_builtin();
+        assert!(reg.format_for_extension("JPG").is_some());
+        assert!(reg.format_for_extension(".jpeg").is_some());
+        assert!(
+            reg.format_for_kind(crate::metadata::formats::jpeg::KIND)
+                .is_some()
+        );
     }
 }

@@ -199,11 +199,14 @@ fn segment(marker: u8, payload: &[u8]) -> Vec<u8> {
 /// The MPF TIFF (big-endian). Its primary entry names the primary image
 /// and its preview entry names the appended preview at `preview_rel`.
 fn mpf_block(primary_len: u32, preview_len: u32, preview_rel: u32) -> Vec<u8> {
+    // Each MP entry is 16 bytes (phase plan Task 7: N x 16-byte entries in a
+    // 32-byte 0xB002 for two images): attribute, size, offset, then two
+    // 16-bit dependent-image offsets, which are zero here.
     let mut index = Vec::with_capacity(32);
-    for v in [0x0003_0000, primary_len, 0] {
+    for v in [0x0003_0000, primary_len, 0, 0] {
         index.extend(v.to_be_bytes());
     }
-    for v in [0x0001_0001, preview_len, preview_rel] {
+    for v in [0x0001_0001, preview_len, preview_rel, 0] {
         index.extend(v.to_be_bytes());
     }
     let ifd0 = IfdBuilder::new()

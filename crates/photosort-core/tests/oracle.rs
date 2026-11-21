@@ -23,6 +23,13 @@
 //! where ExifTool can print them as numbers. Every mismatch is collected and
 //! reported in one table: `file | field | ours | exiftool/expected`.
 //!
+//! Located previews and full-size JPEGs are also compared by offset and
+//! length with ExifTool's ranges: `PreviewIFD:PreviewImageStart` and the MPF
+//! large thumbnail (`MPImageN:MPImageStart`, type 0x010001) for the preview,
+//! and `*:JpgFromRawStart` for the full JPEG. A located range must equal one
+//! of ExifTool's, and ExifTool must report one. A shared wrong offset base in
+//! the testkit and the parser therefore cannot pass.
+//!
 //! The samples folder should include a few silent-mode (electronic shutter)
 //! burst frames, so the ShutterCount rung is exercised on frames whose
 //! mechanical count does not change.
@@ -50,6 +57,8 @@ const EXIFTOOL_CHUNK: usize = 100;
 /// Relative tolerance for ExifTool's `%.7g` float output.
 const FLOAT_RELATIVE_TOLERANCE: f64 = 1e-6;
 
+/// MPImageType as ExifTool prints it with `-n`: 0x010001, Large Thumbnail (VGA equivalent).
+const MPF_LARGE_THUMBNAIL: u64 = 0x01_0001;
 const Z_F_MODEL: &str = "NIKON Z f";
 const Z_F_PREVIEW: (u32, u32) = (640, 424);
 const Z_F_FULL: (u32, u32) = (6048, 4032);
@@ -386,6 +395,20 @@ fn verify_file(
         parsed.meta.full_jpeg,
         expect.full_jpeg,
     );
+    check_located(
+        mismatches,
+        &file,
+        "preview offset (vs ExifTool)",
+        parsed.meta.preview,
+        &preview_references(record),
+    );
+    check_located(
+        mismatches,
+        &file,
+        "full_jpeg offset (vs ExifTool)",
+        parsed.meta.full_jpeg,
+        &full_jpeg_references(record),
+    );
 
     Some(identity_for(
         Some(&parsed.meta),
@@ -576,6 +599,86 @@ fn check_range(
     push(mismatches, file, field, ours, reference);
 }
 
+/// Checks a located range against the offsets ExifTool reports for the same
+/// structure. Absence on both sides is equal. A located range must equal one
+/// of ExifTool's ranges, so an empty ExifTool list never matches a range.
+fn check_located(
+    mismatches: &mut Vec<Mismatch>,
+    file: &str,
+    field: &'static str,
+    ours: Option<ByteRange>,
+    reference: &[(u64, u64)],
+) {
+    let agrees = match ours {
+        None => reference.is_empty(),
+        Some(range) => reference.contains(&(range.offset, range.len)),
+    };
+    if agrees {
+        return;
+    }
+    let ours = match ours {
+        Some(range) => format!("offset {} len {}", range.offset, range.len),
+        None => "<absent>".to_owned(),
+    };
+    let reference = if reference.is_empty() {
+        "<absent>".to_owned()
+    } else {
+        reference
+            .iter()
+            .map(|(offset, len)| format!("offset {offset} len {len}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    push(mismatches, file, field, ours, reference);
+}
+
+/// ExifTool's embedded-JPEG preview ranges: the PreviewIFD preview (NEF and
+/// maker note) and the MPF large thumbnail, whose `MPImageType` is 0x010001.
+fn preview_references(record: &Map<String, Value>) -> Vec<(u64, u64)> {
+    let mut ranges: Vec<(u64, u64)> =
+        embedded_jpegs(record, "PreviewImageStart", "PreviewImageLength")
+            .into_iter()
+            .map(|(_, range)| range)
+            .collect();
+    ranges.extend(
+        embedded_jpegs(record, "MPImageStart", "MPImageLength")
+            .into_iter()
+            .filter(|(group, _)| {
+                reference_u64(record, &format!("{group}:MPImageType")) == Some(MPF_LARGE_THUMBNAIL)
+            })
+            .map(|(_, range)| range),
+    );
+    ranges
+}
+
+/// ExifTool's full-size JPEG ranges, from whichever group names JpgFromRaw.
+fn full_jpeg_references(record: &Map<String, Value>) -> Vec<(u64, u64)> {
+    embedded_jpegs(record, "JpgFromRawStart", "JpgFromRawLength")
+        .into_iter()
+        .map(|(_, range)| range)
+        .collect()
+}
+
+/// Each `Group:start_tag` with its `Group:len_tag`, as (group, (offset, len)).
+/// ExifTool's group names vary (`SubIFD`, `SubIFD1`, `MPImage2`), so every
+/// group that has the start tag is taken.
+fn embedded_jpegs(
+    record: &Map<String, Value>,
+    start_tag: &str,
+    len_tag: &str,
+) -> Vec<(String, (u64, u64))> {
+    let suffix = format!(":{start_tag}");
+    record
+        .keys()
+        .filter_map(|key| {
+            let group = key.strip_suffix(&suffix)?;
+            let start = reference_u64(record, key)?;
+            let len = reference_u64(record, &format!("{group}:{len_tag}"))?;
+            Some((group.to_owned(), (start, len)))
+        })
+        .collect()
+}
+
 /// Reads the located bytes from disk and decodes them. The bytes must start
 /// with the JPEG SOI marker and must decode.
 fn decode_range(path: &Path, range: ByteRange) -> Result<(u32, u32), String> {
@@ -666,6 +769,15 @@ fn extension_lower(path: &Path) -> Option<String> {
     path.extension()
         .and_then(OsStr::to_str)
         .map(str::to_ascii_lowercase)
+}
+
+/// A reference value as an unsigned integer, or `None` if it is absent or not a number.
+fn reference_u64(record: &Map<String, Value>, key: &str) -> Option<u64> {
+    match record.get(key)? {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
 }
 
 /// A reference value as a string. ExifTool prints number-like strings

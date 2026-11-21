@@ -27,6 +27,11 @@ use crate::scan_queue::{Job, JobQueue};
 /// Calls the UI's repaint hook. Every event send is followed by one call.
 pub(crate) type Waker = Arc<dyn Fn() + Send + Sync>;
 
+/// Decodes one preview job. `start` passes `load_preview`; a test passes a
+/// loader that panics, to cover the panic guard around preview jobs.
+type PreviewLoader =
+    fn(&PreviewBytes, ShotId, &Path, ByteRange, Option<u16>) -> Result<DecodedImage, String>;
+
 /// Bounded, so a slow UI applies backpressure to the workers.
 const EVENT_CAPACITY: usize = 8192;
 /// SD cards gain little from more parallel readers.
@@ -349,6 +354,7 @@ struct Ctx {
     waker: Waker,
     registry: Arc<Registry>,
     bytes: Arc<PreviewBytes>,
+    preview_loader: PreviewLoader,
     generation: u64,
 }
 
@@ -362,11 +368,20 @@ impl Scanner {
         waker: Waker,
         generation: u64,
     ) -> (Scanner, Receiver<ScanEvent>) {
-        Self::start_with_capacity(root, registry, bytes, waker, generation, EVENT_CAPACITY)
+        Self::start_with_capacity(
+            root,
+            registry,
+            bytes,
+            waker,
+            generation,
+            EVENT_CAPACITY,
+            load_preview,
+        )
     }
 
-    /// As `start`, with the event queue's capacity given. Only `start` passes
-    /// `EVENT_CAPACITY`; tests pass a small queue to fill it.
+    /// As `start`, with the event queue's capacity and the preview loader
+    /// given. Only `start` passes `EVENT_CAPACITY` and `load_preview`; tests
+    /// pass a small queue to fill it, or a loader that panics.
     fn start_with_capacity(
         root: PathBuf,
         registry: Arc<Registry>,
@@ -374,6 +389,7 @@ impl Scanner {
         waker: Waker,
         generation: u64,
         capacity: usize,
+        preview_loader: PreviewLoader,
     ) -> (Scanner, Receiver<ScanEvent>) {
         let (tx, rx) = mpsc::sync_channel(capacity);
         let ctx = Ctx {
@@ -382,6 +398,7 @@ impl Scanner {
             waker,
             registry,
             bytes,
+            preview_loader,
             generation,
         };
         let scanner = Scanner {
@@ -522,9 +539,10 @@ fn run_worker(ctx: &Ctx) {
                 range,
                 orientation,
             } => {
-                let result =
-                    catch_panic(|| load_preview(&ctx.bytes, shot, &path, range, orientation))
-                        .and_then(std::convert::identity);
+                let result = catch_panic(|| {
+                    (ctx.preview_loader)(&ctx.bytes, shot, &path, range, orientation)
+                })
+                .and_then(std::convert::identity);
                 ctx.emit(ScanEvent::Preview {
                     generation: ctx.generation,
                     shot,
@@ -1280,6 +1298,7 @@ mod tests {
             waker,
             7,
             2,
+            load_preview,
         );
         let probe = Arc::downgrade(&wakes);
         receive_until(&rx, |e| matches!(e, ScanEvent::Listed { .. }));
@@ -1436,5 +1455,57 @@ mod tests {
             panicked.meta
         );
         assert!(outcome_by_name(&events, "DSC_0002.JPG").meta.is_ok());
+    }
+
+    /// A preview loader that always panics. Only the panic-guard test uses it.
+    fn panicking_preview_loader(
+        _bytes: &PreviewBytes,
+        _shot: ShotId,
+        _path: &Path,
+        _range: ByteRange,
+        _orientation: Option<u16>,
+    ) -> Result<DecodedImage, String> {
+        panic!("preview exploded")
+    }
+
+    /// A panicking preview job still reports its outcome, so its tile does not
+    /// wait forever and the worker keeps running.
+    #[test]
+    fn a_panicking_preview_job_reports_an_error() {
+        let dir = tempdir().expect("temp dir");
+        let (waker, _) = counting_waker();
+        let bytes = Arc::new(preview_bytes(&CacheSplit {
+            bytes: 64 * MIB,
+            textures: 0,
+        }));
+        let (scanner, rx) = Scanner::start_with_capacity(
+            dir.path().to_path_buf(),
+            Arc::new(Registry::with_builtin()),
+            bytes,
+            waker,
+            7,
+            EVENT_CAPACITY,
+            panicking_preview_loader,
+        );
+        let shot = ShotId(0);
+        scanner.request_preview(
+            shot,
+            dir.path().join("DSC_0001.JPG"),
+            ByteRange { offset: 0, len: 1 },
+            None,
+        );
+
+        let mut events = receive_until(&rx, |e| matches!(e, ScanEvent::Preview { .. }));
+        let Some(ScanEvent::Preview {
+            shot: id, result, ..
+        }) = events.pop()
+        else {
+            panic!("the last event is a Preview");
+        };
+        assert_eq!(id, shot);
+        assert!(
+            matches!(&result, Err(message) if message == "worker panicked: preview exploded"),
+            "{result:?}"
+        );
     }
 }

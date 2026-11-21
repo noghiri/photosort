@@ -945,4 +945,36 @@ mod tests {
             "- 2 3\n12.3 4 5\n# dropped 0\n"
         );
     }
+
+    /// Drives `logic` and `ui` through a real egui pass. `Frame::_new_kittest`
+    /// is `#[doc(hidden)]` in eframe; the exact pin `=0.37.0` keeps it stable.
+    /// A `logic` call logs only when the `ui` pass before it drew.
+    #[test]
+    fn logic_logs_a_line_only_after_a_drawn_pass() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("frames.log");
+        let (log, writer) = frame_log::spawn(&path).expect("the file opens");
+        let waker: Waker = Arc::new(|| {});
+        let mut app = PhotosortApp::build(waker, Some(log), FALLBACK);
+        let ctx = egui::Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+
+        // No `ui` pass has run, so this logic-only frame writes nothing.
+        eframe::App::logic(&mut app, &ctx, &mut frame);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            eframe::App::ui(&mut app, ui, &mut frame);
+        });
+        // The texture delta is not uploaded here, and epaint panics on drop if
+        // it is not cleared.
+        output.textures_delta.clear();
+        // The drawn pass is logged by the logic call that follows it.
+        eframe::App::logic(&mut app, &ctx, &mut frame);
+        drop(app);
+
+        writer.join().expect("the writer ends");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the log is readable"),
+            "- 0 0\n# dropped 0\n"
+        );
+    }
 }

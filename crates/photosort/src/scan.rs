@@ -570,7 +570,7 @@ fn load_preview(
             encoded
         }
     };
-    decode_preview(&encoded, orientation, Some(TILE_TEXTURE_MAX)).map_err(|e| e.to_string())
+    decode_preview(&encoded, orientation, TILE_TEXTURE_MAX).map_err(|e| e.to_string())
 }
 
 impl Drop for Scanner {

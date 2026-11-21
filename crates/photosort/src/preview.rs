@@ -51,14 +51,13 @@ pub(crate) fn read_range(path: &Path, range: ByteRange) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Decodes a JPEG preview, applies its EXIF orientation, then fits it inside
-/// `max_side` when either side is longer. Decoding does not apply orientation
-/// by itself. `None` keeps the full size, which the overlay needs; the tile
-/// path passes `Some(TILE_TEXTURE_MAX)`. The decoder's own limits always apply.
+/// Decodes a JPEG preview, applies its EXIF orientation, then fits it inside a
+/// `max_side` square when either side is longer. Decoding does not apply
+/// orientation by itself. The decoder's own limits always apply.
 pub(crate) fn decode_preview(
     bytes: &[u8],
     orientation: Option<u16>,
-    max_side: Option<u32>,
+    max_side: u32,
 ) -> Result<DecodedImage, PreviewError> {
     let mut reader = ImageReader::with_format(Cursor::new(bytes), ImageFormat::Jpeg);
     reader.limits(decode_limits());
@@ -70,10 +69,9 @@ pub(crate) fn decode_preview(
     {
         image.apply_orientation(orientation);
     }
-    // `thumbnail` keeps the aspect ratio and fits inside the square `max`.
-    let bound = max_side.filter(|max| image.width() > *max || image.height() > *max);
-    if let Some(max) = bound {
-        image = image.thumbnail(max, max);
+    // `thumbnail` keeps the aspect ratio and fits inside the square `max_side`.
+    if image.width() > max_side || image.height() > max_side {
+        image = image.thumbnail(max_side, max_side);
     }
     let rgba = image.to_rgba8();
     Ok(DecodedImage {
@@ -83,7 +81,9 @@ pub(crate) fn decode_preview(
 }
 
 /// The decoder limits for an embedded preview. `Limits` is non-exhaustive, so
-/// it starts from `no_limits` and sets each field.
+/// it starts from `no_limits` and sets each field. The overlay's full-size
+/// decode (phase 4, `decode_full`) does not use these unless it passes them
+/// too, so it must check the image's dimensions before decoding.
 fn decode_limits() -> Limits {
     let mut limits = Limits::no_limits();
     limits.max_image_width = Some(DECODE_MAX_SIDE);
@@ -107,14 +107,15 @@ mod tests {
 
     #[test]
     fn a_640_by_424_jpeg_decodes_to_640_by_424() {
-        let image = decode_preview(&tiny_jpeg(640, 424), None, None).expect("decodes");
+        let image = decode_preview(&tiny_jpeg(640, 424), None, TILE_TEXTURE_MAX).expect("decodes");
         assert_eq!(image.size, [640, 424]);
         assert_eq!(image.rgba.len(), 640 * 424 * 4);
     }
 
     #[test]
     fn orientation_6_rotates_the_preview_to_portrait() {
-        let image = decode_preview(&tiny_jpeg(640, 424), Some(6), None).expect("decodes");
+        let image =
+            decode_preview(&tiny_jpeg(640, 424), Some(6), TILE_TEXTURE_MAX).expect("decodes");
         assert_eq!(image.size, [424, 640]);
     }
 
@@ -122,15 +123,15 @@ mod tests {
     fn orientation_1_and_out_of_range_values_leave_the_size_alone() {
         let bytes = tiny_jpeg(640, 424);
         for orientation in [Some(1), Some(9), Some(0x100), None] {
-            let image = decode_preview(&bytes, orientation, None).expect("decodes");
+            let image = decode_preview(&bytes, orientation, TILE_TEXTURE_MAX).expect("decodes");
             assert_eq!(image.size, [640, 424], "orientation {orientation:?}");
         }
     }
 
     #[test]
     fn corrupt_bytes_are_an_error_not_a_panic() {
-        assert!(decode_preview(b"\xFF\xD8garbage", None, None).is_err());
-        assert!(decode_preview(&[], None, None).is_err());
+        assert!(decode_preview(b"\xFF\xD8garbage", None, TILE_TEXTURE_MAX).is_err());
+        assert!(decode_preview(&[], None, TILE_TEXTURE_MAX).is_err());
     }
 
     /// A 2000 × 1500 preview, which is larger than any tile texture, is fitted
@@ -138,7 +139,7 @@ mod tests {
     #[test]
     fn an_oversized_preview_is_fitted_to_the_tile_texture_bound() {
         let image =
-            decode_preview(&tiny_jpeg(2000, 1500), None, Some(TILE_TEXTURE_MAX)).expect("decodes");
+            decode_preview(&tiny_jpeg(2000, 1500), None, TILE_TEXTURE_MAX).expect("decodes");
         assert_eq!(image.size, [1280, 960]);
         assert_eq!(image.rgba.len(), 1280 * 960 * 4);
     }
@@ -147,7 +148,7 @@ mod tests {
     #[test]
     fn the_bound_applies_to_the_long_side_of_a_portrait_preview() {
         let image =
-            decode_preview(&tiny_jpeg(1500, 2000), None, Some(TILE_TEXTURE_MAX)).expect("decodes");
+            decode_preview(&tiny_jpeg(1500, 2000), None, TILE_TEXTURE_MAX).expect("decodes");
         assert_eq!(image.size, [960, 1280]);
     }
 
@@ -155,24 +156,16 @@ mod tests {
     /// bound applies, so the result is portrait: 960 × 1280.
     #[test]
     fn orientation_and_the_bound_together_give_a_portrait_fit() {
-        let image = decode_preview(&tiny_jpeg(2000, 1500), Some(6), Some(TILE_TEXTURE_MAX))
-            .expect("decodes");
+        let image =
+            decode_preview(&tiny_jpeg(2000, 1500), Some(6), TILE_TEXTURE_MAX).expect("decodes");
         assert_eq!(image.size, [960, 1280]);
     }
 
     /// The Z f preview (640 × 424) is within the bound, so it is not resized.
     #[test]
     fn a_preview_within_the_bound_keeps_its_size() {
-        let image =
-            decode_preview(&tiny_jpeg(640, 424), None, Some(TILE_TEXTURE_MAX)).expect("decodes");
+        let image = decode_preview(&tiny_jpeg(640, 424), None, TILE_TEXTURE_MAX).expect("decodes");
         assert_eq!(image.size, [640, 424]);
-    }
-
-    /// Without a bound the full size is kept. The overlay decodes this way.
-    #[test]
-    fn without_a_bound_a_large_preview_keeps_its_full_size() {
-        let image = decode_preview(&tiny_jpeg(2000, 1500), None, None).expect("decodes");
-        assert_eq!(image.size, [2000, 1500]);
     }
 
     /// A side past the decoder's dimension limit is refused before decoding.
@@ -180,12 +173,12 @@ mod tests {
     #[test]
     fn a_preview_past_the_decoder_dimension_limit_is_an_error() {
         let bytes = tiny_jpeg(DECODE_MAX_SIDE + 1, 8);
-        assert!(decode_preview(&bytes, None, None).is_err());
+        assert!(decode_preview(&bytes, None, TILE_TEXTURE_MAX).is_err());
     }
 
     #[test]
     fn to_color_image_keeps_the_decoded_size() {
-        let image = decode_preview(&tiny_jpeg(640, 424), None, None).expect("decodes");
+        let image = decode_preview(&tiny_jpeg(640, 424), None, TILE_TEXTURE_MAX).expect("decodes");
         let color = to_color_image(&image);
         assert_eq!(color.size, [640, 424]);
     }

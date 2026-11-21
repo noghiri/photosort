@@ -11,3 +11,8 @@ workspace = true
 
 [dependencies]
 image = { workspace = true }
+
+[[example]]
+name = "gen_card"
+# Run the example's unit tests under `cargo test`, which skips them by default.
+test = true

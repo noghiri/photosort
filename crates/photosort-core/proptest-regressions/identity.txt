@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e312bead5edc6ba90b87b4e0c675084873458ec68b36b84f41cb675dec91e577 # shrinks to key = Counter { make: "", serial: "", counter: 0, dto: "", subsec: "" }

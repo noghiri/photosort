@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/photosort-core", "crates/photosort"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+repository = "https://github.com/noghiri/photosort"
+publish = false
+
+[workspace.dependencies]
+photosort-core = { path = "crates/photosort-core" }
+eframe = "=0.37.0"
+
+[workspace.lints.clippy]
+# House style: `push_str(&format!(..))` allocates needlessly; use `write!`.
+format_push_string = "warn"

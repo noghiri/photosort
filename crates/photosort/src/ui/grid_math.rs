@@ -127,6 +127,28 @@ pub(crate) fn reveal_row(row: usize, row_height: f32, offset: f32, viewport: f32
     }
 }
 
+/// The size of an image scaled to fit a square of side `side`, keeping its
+/// aspect ratio. An empty image fills the square.
+pub(crate) fn fit_within(size: [f32; 2], side: f32) -> [f32; 2] {
+    let [w, h] = size;
+    if w <= 0.0 || h <= 0.0 {
+        return [side, side];
+    }
+    let scale = (side / w).min(side / h);
+    [w * scale, h * scale]
+}
+
+/// At most `max_chars` characters of `name`, ending in `…` when cut.
+pub(crate) fn truncate_name(name: &str, max_chars: usize) -> String {
+    if name.chars().count() <= max_chars {
+        return name.to_owned();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let mut cut: String = name.chars().take(keep).collect();
+    cut.push('…');
+    cut
+}
+
 /// Visible shots that need a preview request: no texture, not in flight, and a
 /// preview exists.
 pub(crate) fn previews_to_request(
@@ -428,5 +450,29 @@ mod tests {
 
         // 0 has a texture, 1 was evicted, 2 is in flight, 3 has no preview.
         assert_eq!(requests, ids(&[1]));
+    }
+
+    // Tile drawing helpers
+
+    #[test]
+    fn a_landscape_image_fits_the_width_of_the_square() {
+        assert_eq!(fit_within([640.0, 424.0], 200.0), [200.0, 132.5]);
+    }
+
+    #[test]
+    fn a_portrait_image_fits_the_height_of_the_square() {
+        assert_eq!(fit_within([424.0, 640.0], 200.0), [132.5, 200.0]);
+    }
+
+    #[test]
+    fn an_empty_image_fills_the_square() {
+        assert_eq!(fit_within([0.0, 0.0], 200.0), [200.0, 200.0]);
+    }
+
+    #[test]
+    fn a_long_name_is_cut_with_an_ellipsis() {
+        assert_eq!(truncate_name("DSC_0001.JPG", 20), "DSC_0001.JPG");
+        assert_eq!(truncate_name("DSC_0001.JPG", 6), "DSC_0…");
+        assert_eq!(truncate_name("DSC_0001.JPG", 0), "…");
     }
 }

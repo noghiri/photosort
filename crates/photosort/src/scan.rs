@@ -84,6 +84,13 @@ pub(crate) enum ScanError {
 
 /// Walks `root` and groups the registered image files into shots. Entries
 /// that cannot be read are returned as `skipped` messages, and the walk goes on.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "test-only wrapper; the lister calls the cancellable list_source_until"
+    )
+)]
 pub(crate) fn list_source(
     root: &Path,
     registry: &Registry,

@@ -94,12 +94,26 @@ impl JobQueue {
     }
 
     /// Drops every pending job and the visible list.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "used by tests; the scanner replaces its queue rather than clearing it"
+        )
+    )]
     pub(crate) fn clear(&mut self) {
         self.pending.clear();
         self.visible.clear();
         self.len = 0;
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "used by tests; the scanner never reads the queue length"
+        )
+    )]
     pub(crate) fn len(&self) -> usize {
         self.len
     }

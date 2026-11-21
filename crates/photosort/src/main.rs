@@ -4,22 +4,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
 mod budget;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
 mod cache;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
+mod frame_log;
 mod preview;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
 mod scan;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
+mod scan_model;
 mod scan_queue;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
 mod ui;
+
+use std::path::Path;
+use std::sync::mpsc::SyncSender;
 
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    let frame_log = frame_log_from_env();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("photosort")
@@ -29,6 +29,19 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "photosort",
         options,
-        Box::new(|_cc| Ok(Box::new(app::PhotosortApp))),
+        Box::new(move |cc| Ok(Box::new(app::PhotosortApp::new(cc, frame_log)))),
     )
+}
+
+/// The frame log is opt-in: `PHOTOSORT_FRAME_LOG` names the file to write.
+/// If the file cannot be created, the app runs without the log.
+fn frame_log_from_env() -> Option<SyncSender<String>> {
+    let path = std::env::var_os("PHOTOSORT_FRAME_LOG")?;
+    match frame_log::spawn(Path::new(&path)) {
+        Ok(sender) => Some(sender),
+        Err(err) => {
+            eprintln!("photosort: frame log disabled, failed to create the file: {err}");
+            None
+        }
+    }
 }

@@ -83,8 +83,26 @@ struct Segments {
 /// Walks the marker segments from the SOI up to SOS or EOI, recording where
 /// the first Exif APP1 and MPF APP2 TIFF headers start. Stops after
 /// `MAX_SEGMENTS` segments and keeps what it found.
+///
+/// Deviation from phase_02.md: the plan propagates every walk error. Here,
+/// once one base is recorded, a later corrupt marker or cut-off segment keeps
+/// the bases found so far, so one bad segment does not discard valid EXIF.
+/// `NeedMore` always propagates, so the shell can supply the bytes it asks
+/// for. The walk also stops as soon as both bases are set, because reading
+/// on could only add `NeedMore` re-reads.
 fn walk_segments(input: &ParseInput<'_>) -> Result<Segments, ParseError> {
     let mut segments = Segments::default();
+    match scan_segments(input, &mut segments) {
+        Ok(()) => Ok(segments),
+        Err(need @ ParseError::NeedMore { .. }) => Err(need),
+        Err(_) if segments.exif_base.is_some() || segments.mpf_base.is_some() => Ok(segments),
+        Err(err) => Err(err),
+    }
+}
+
+/// Records the bases into `segments` as it goes, so a caller that gets an
+/// error still sees the bases found before it.
+fn scan_segments(input: &ParseInput<'_>, segments: &mut Segments) -> Result<(), ParseError> {
     let mut pos: u64 = 2;
     // Every position used below was either read by `byte_at` or
     // `segment_length`, which succeeded, or is one of those reads' ends.
@@ -105,7 +123,7 @@ fn walk_segments(input: &ParseInput<'_>) -> Result<Segments, ParseError> {
             code = byte_at(input, code_at)?;
         }
         if code == SOS || code == EOI {
-            return Ok(segments);
+            return Ok(());
         }
         // `code_at` was read by `byte_at`, so `code_at + 1` cannot overflow.
         let length_at = code_at + 1;
@@ -132,11 +150,14 @@ fn walk_segments(input: &ParseInput<'_>) -> Result<Segments, ParseError> {
             // `has_prefix` returned true, so it read the four bytes at `payload`.
             segments.mpf_base = Some(payload + 4);
         }
+        if segments.exif_base.is_some() && segments.mpf_base.is_some() {
+            return Ok(());
+        }
         // `length_at + 2` is inside `head` and `len` is at most 65,535, so this
         // is at most `head.len() + 65,533`. The next `byte_at` checks it.
         pos = length_at + u64::from(len);
     }
-    Ok(segments)
+    Ok(())
 }
 
 fn byte_at(input: &ParseInput<'_>, at: u64) -> Result<u8, ParseError> {
@@ -227,13 +248,31 @@ mod tests {
     };
 
     fn read_jpeg(file: &[u8]) -> Result<Metadata, ParseError> {
+        parse_head(file, file.len())
+    }
+
+    /// Parses `head` as the first bytes of a file of `file_len` bytes.
+    fn parse_head(head: &[u8], file_len: usize) -> Result<Metadata, ParseError> {
         let makernotes: Vec<Box<dyn MakerNoteReader>> = vec![Box::new(NikonMakerNotes)];
         let input = ParseInput {
-            head: file,
-            file_len: u64::try_from(file.len()).unwrap(),
+            head,
+            file_len: u64::try_from(file_len).unwrap(),
             makernotes: &makernotes,
         };
         JpegReader.parse(&input)
+    }
+
+    /// Offset just past the first segment with `marker`, found by walking the
+    /// segment headers of a file the testkit wrote.
+    fn segment_end(file: &[u8], marker: u8) -> usize {
+        let mut pos = 2;
+        loop {
+            let len = usize::from(u16::from_be_bytes([file[pos + 2], file[pos + 3]]));
+            if file[pos + 1] == marker {
+                return pos + 2 + len;
+            }
+            pos += 2 + len;
+        }
     }
 
     #[test]
@@ -409,5 +448,40 @@ mod tests {
                 what: "jpeg marker"
             })
         );
+    }
+
+    /// A corrupt marker after a usable APP1 keeps the EXIF. The plan's walker
+    /// failed the whole file here.
+    #[test]
+    fn exif_is_kept_when_a_later_marker_is_corrupt() {
+        let file = jpeg_file(Order::Little, Some(&ExifSpec::zf()), None, None);
+        let mut corrupt = file.clone();
+        corrupt[segment_end(&file, 0xE1)] = 0x00;
+        let clean = read_jpeg(&file).unwrap();
+        assert!(clean.make.is_some(), "the clean file has EXIF");
+        assert_eq!(read_jpeg(&corrupt), Ok(clean));
+    }
+
+    /// Once the EXIF and MPF bases are both found the walk stops. A head that
+    /// ends right after the MPF segment therefore parses without a re-read.
+    #[test]
+    fn walk_stops_once_exif_and_mpf_are_found() {
+        let preview = tiny_jpeg(320, 212);
+        let file = jpeg_file(Order::Little, Some(&ExifSpec::zf()), None, Some(&preview));
+        let head = &file[..segment_end(&file, 0xE2)];
+        assert_eq!(parse_head(head, file.len()), read_jpeg(&file));
+    }
+
+    /// With EXIF found but the MPF segment not yet read, a short head still
+    /// asks for more. Returning the EXIF alone would drop the preview.
+    #[test]
+    fn need_more_propagates_while_the_mpf_base_is_missing() {
+        let preview = tiny_jpeg(320, 212);
+        let file = jpeg_file(Order::Little, Some(&ExifSpec::zf()), None, Some(&preview));
+        let head = &file[..segment_end(&file, 0xE1)];
+        assert!(matches!(
+            parse_head(head, file.len()),
+            Err(ParseError::NeedMore { .. })
+        ));
     }
 }

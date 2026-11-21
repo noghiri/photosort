@@ -536,7 +536,7 @@ Steps (a human, or the executor when it can drive the app; record the results un
    - **AC9.1:** placeholder tiles for all shots appear within 3 s (status shows the shot count).
    - The four edge-case files: `.MOV` and `.xmp` are absent, while the truncated JPEG and the zero-byte NEF show "⚠ unreadable" tiles.
 4. While the parse pass runs, scroll quickly and tick tiles with Space.
-   - **AC9.2:** afterwards, `Get-Content $env:TEMP\ps-frames.log | ForEach-Object { [double]($_ -split ' ')[0] } | Measure-Object -Maximum` reports a maximum below 100 ms.
+   - **AC9.2:** afterwards, `Get-Content $env:TEMP\ps-frames.log | Where-Object { $_ -match '^[0-9]' } | ForEach-Object { [double]($_ -split ' ')[0] } | Measure-Object -Maximum` reports a maximum below 100 ms. First check that the log's last line is `# dropped 0`; a non-zero count means frames were lost, and the AC9.2 result is not trustworthy.
 5. Keyboard (AC2.5-AC2.7):
    - arrows move the ring, and the grid scrolls to keep it visible;
    - Shift+arrows extend the range, and Space ticks or unticks it;

@@ -40,7 +40,8 @@ impl MakerNoteReader for NikonMakerNotes {
         Ok(VendorFields {
             shot_counter: optional_tag(&ifd0, TAG_SHUTTER_COUNT, |e| e.first_u32(&tiff))?
                 .map(u64::from),
-            serial: optional_tag(&ifd0, TAG_SERIAL, |e| e.ascii(&tiff))?,
+            // An empty string is no serial, as in the Exif body-serial read.
+            serial: optional_tag(&ifd0, TAG_SERIAL, |e| e.ascii(&tiff))?.filter(|s| !s.is_empty()),
             preview: preview(&tiff, &ifd0)?,
         })
     }
@@ -106,6 +107,21 @@ mod tests {
         };
         let file = nef_file(Order::Little, &exif, Some(&nikon), None, 0);
         assert_eq!(read_nef(&file).serial.as_deref(), Some("7654321"));
+    }
+
+    /// An empty maker-note serial reads as absent, as an empty body serial does.
+    #[test]
+    fn empty_maker_note_serial_reads_as_absent() {
+        let exif = ExifSpec {
+            body_serial: None,
+            ..ExifSpec::zf()
+        };
+        let nikon = NikonSpec {
+            serial: Some(String::new()),
+            ..NikonSpec::zf(None)
+        };
+        let file = nef_file(Order::Big, &exif, Some(&nikon), None, 0);
+        assert_eq!(read_nef(&file).serial, None);
     }
 
     #[test]

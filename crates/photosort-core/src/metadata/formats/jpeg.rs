@@ -84,9 +84,12 @@ struct Segments {
 /// the first Exif APP1 and MPF APP2 TIFF headers start. Stops after
 /// `MAX_SEGMENTS` segments and keeps what it found.
 ///
-/// Deviation from phase_02.md: the plan propagates every walk error. Here,
-/// once one base is recorded, a later corrupt marker or cut-off segment keeps
-/// the bases found so far, so one bad segment does not discard valid EXIF.
+/// A segment whose declared end is past end-of-file is `Malformed`: its bytes
+/// can never arrive. Deviation from phase_02.md: the plan propagates every
+/// walk error. Here, once one base is recorded, a later corrupt marker or
+/// truncated segment keeps the bases found so far, so one bad segment does not
+/// discard valid EXIF. With no base yet, the error fails the file, so a JPEG
+/// cut inside its APP1 is an error rather than a name-only placeholder.
 /// `NeedMore` always propagates, so the shell can supply the bytes it asks
 /// for. The walk also stops as soon as both bases are set, because reading
 /// on could only add `NeedMore` re-reads.
@@ -132,6 +135,18 @@ fn scan_segments(input: &ParseInput<'_>, segments: &mut Segments) -> Result<(), 
             continue;
         }
         let len = segment_length(input, length_at)?;
+        // A segment whose declared end is past EOF is truncated. Its bytes can
+        // never arrive, so it is `Malformed`, not `NeedMore`. The check uses
+        // `file_len`, not `head.len()`, so a short head still asks for more.
+        if length_at
+            .checked_add(u64::from(len))
+            .ok_or(OVERFLOW)?
+            > input.file_len
+        {
+            return Err(ParseError::Malformed {
+                what: "jpeg segment past end of file",
+            });
+        }
         // `segment_length` read the two bytes at `length_at`, so `length_at + 2` is at most `head.len()`.
         let payload = length_at + 2;
         // `segment_length` rejects `len < 2`, so the subtraction cannot underflow.
@@ -483,6 +498,33 @@ mod tests {
             parse_head(head, file.len()),
             Err(ParseError::NeedMore { .. })
         ));
+    }
+
+    /// An APP1 whose declared end passes end-of-file, with no earlier base,
+    /// fails the file. It is not read as partial EXIF.
+    #[test]
+    fn truncated_app1_with_no_earlier_base_is_malformed() {
+        let file = jpeg_file(Order::Little, Some(&ExifSpec::zf()), None, None);
+        let cut = segment_end(&file, 0xE1) - 1;
+        assert_eq!(
+            read_jpeg(&file[..cut]),
+            Err(ParseError::Malformed {
+                what: "jpeg segment past end of file"
+            })
+        );
+    }
+
+    /// A complete APP1 followed by an APP2 cut at end-of-file keeps the EXIF.
+    /// The truncated APP2 is dropped as the partial-result rule allows.
+    #[test]
+    fn complete_app1_followed_by_a_truncated_app2_keeps_the_exif() {
+        let preview = tiny_jpeg(320, 212);
+        let file = jpeg_file(Order::Little, Some(&ExifSpec::zf()), None, Some(&preview));
+        let exif_only = &file[..segment_end(&file, 0xE1)];
+        let cut = segment_end(&file, 0xE2) - 1;
+        let expected = read_jpeg(exif_only).expect("the EXIF-only file parses");
+        assert!(expected.make.is_some(), "the APP1 holds EXIF");
+        assert_eq!(read_jpeg(&file[..cut]), Ok(expected));
     }
 
     /// MPF found with no Exif APP1, then a corrupt marker. The walk error must

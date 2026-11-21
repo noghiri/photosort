@@ -874,13 +874,10 @@ mod tests {
         ));
     }
 
-    /// Documents current parser behavior, which differs from the plan's
-    /// expectation that gen_card's 100-byte truncated JPEG is an error. The
-    /// EXIF fields that lie past end-of-file read as absent, so the file parses
-    /// with partial metadata and no capture time. Changing that is a core
-    /// parser decision and is not made here.
+    /// A JPEG cut inside its APP1 segment is an error, not partial metadata.
+    /// The segment's declared end is past end-of-file, so it can never parse.
     #[test]
-    fn a_jpeg_cut_inside_its_exif_keeps_the_fields_it_still_has() {
+    fn a_jpeg_cut_inside_its_app1_segment_is_an_error_with_a_content_identity() {
         let dir = tempdir().expect("temp dir");
         let full = jpeg_with_exif();
         let path = dir.path().join("TRUNC_0001.JPG");
@@ -888,9 +885,7 @@ mod tests {
 
         let outcome = parse_file(&path, jpeg::KIND, &Registry::with_builtin());
 
-        let meta = outcome.meta.expect("the readable head still parses");
-        assert_eq!(meta.make.as_deref(), Some("NIKON CORPORATION"));
-        assert_eq!(meta.date_time_original, None);
+        assert!(outcome.meta.is_err(), "{:?}", outcome.meta);
         assert!(matches!(
             outcome.identity,
             Some(IdentityKey::Content { .. })
@@ -1005,7 +1000,7 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         let valid = jpeg_with_exif();
         write_file(&dir.path().join("good.JPG"), &valid);
-        write_file(&dir.path().join("trunc.JPG"), &valid[..16]);
+        write_file(&dir.path().join("trunc.JPG"), &valid[..100]);
         write_file(&dir.path().join("empty.NEF"), &[]);
         write_file(&dir.path().join("clip.MOV"), b"movie");
         write_file(&dir.path().join("sidecar.xmp"), b"<x:xmpmeta/>");

@@ -25,11 +25,14 @@
 //! reported in one table: `file | field | ours | exiftool/expected`.
 //!
 //! Located previews and full-size JPEGs are also compared by offset and
-//! length with ExifTool's ranges: `PreviewIFD:PreviewImageStart` and the MPF
-//! large thumbnail (`MPImageN:MPImageStart`, type 0x010001) for the preview,
-//! and `*:JpgFromRawStart` for the full JPEG. A located range must equal one
-//! of ExifTool's, and ExifTool must report one. A shared wrong offset base in
-//! the testkit and the parser therefore cannot pass.
+//! length with ExifTool's ranges. For the preview these are
+//! `PreviewIFD:PreviewImageStart` (maker note or NEF) and each MPF entry
+//! `MPImageN:MPImageStart` whose `MPImageType` has class bits 0x010000, the
+//! rule ExifTool uses at MPF.pm:206. For the full JPEG these are
+//! `*:JpgFromRawStart` and `*:OtherImageStart`, which ExifTool uses for the
+//! same 0x0201 pair in different IFDs (Exif.pm:1152-1157). A located range
+//! must equal one of ExifTool's, and ExifTool must report one. A shared wrong
+//! offset base in the testkit and the parser therefore cannot pass.
 //!
 //! The samples folder should include a few silent-mode (electronic shutter)
 //! burst frames, so the ShutterCount rung is exercised on frames whose
@@ -48,7 +51,8 @@ use photosort_core::identity::identity_for;
 use photosort_core::metadata::Registry;
 use photosort_core::model::{ByteRange, IdentityKey, Metadata, ParseError, Rational};
 use photosort_testkit::{
-    ExifSpec, NikonSpec, Order, jpeg_file, jpeg_file_with_mpf_order, nef_file, tiny_jpeg,
+    ExifSpec, IfdBuilder, NikonSpec, Order, jpeg_file, jpeg_file_with_mpf_order,
+    jpeg_file_with_mpf_type, nef_file, tiny_jpeg, write_tiff,
 };
 use serde_json::{Map, Value};
 
@@ -58,8 +62,11 @@ const EXIFTOOL_CHUNK: usize = 100;
 /// Relative tolerance for ExifTool's `%.7g` float output.
 const FLOAT_RELATIVE_TOLERANCE: f64 = 1e-6;
 
-/// MPImageType as ExifTool prints it with `-n`: 0x010001, Large Thumbnail (VGA equivalent).
-const MPF_LARGE_THUMBNAIL: u64 = 0x01_0001;
+/// ExifTool's preview rule for MPImageType, printed with `-n` (MPF.pm:206):
+/// the class bits must be 0x010000. That accepts the large thumbnails
+/// 0x010001 to 0x010005 (MPF.pm:128-132).
+const MPF_CLASS_MASK: u64 = 0x0F_0000;
+const MPF_LARGE_THUMBNAIL_CLASS: u64 = 0x01_0000;
 const Z_F_MODEL: &str = "NIKON Z f";
 const Z_F_PREVIEW: (u32, u32) = (640, 424);
 const Z_F_FULL: (u32, u32) = (6048, 4032);
@@ -234,7 +241,7 @@ fn synthetic_cases() -> Vec<(&'static str, Vec<u8>, Expectations)> {
         ..nikon.clone()
     };
 
-    let jpeg_mpf = Expectations {
+    let jpeg_preview = Expectations {
         preview: Expect::Size(SYNTH_PREVIEW.0, SYNTH_PREVIEW.1),
         full_jpeg: Expect::Absent,
     };
@@ -260,7 +267,7 @@ fn synthetic_cases() -> Vec<(&'static str, Vec<u8>, Expectations)> {
                 Some(&NikonSpec::zf(None)),
                 Some(&preview),
             ),
-            jpeg_mpf,
+            jpeg_preview,
         ),
         (
             "jpeg-be-note-mpf.jpg",
@@ -270,7 +277,7 @@ fn synthetic_cases() -> Vec<(&'static str, Vec<u8>, Expectations)> {
                 Some(&NikonSpec::zf(None)),
                 Some(&preview),
             ),
-            jpeg_mpf,
+            jpeg_preview,
         ),
         (
             "jpeg-be-note-mpf-le.jpg",
@@ -281,7 +288,29 @@ fn synthetic_cases() -> Vec<(&'static str, Vec<u8>, Expectations)> {
                 Some(&NikonSpec::zf(None)),
                 Some(&preview),
             ),
-            jpeg_mpf,
+            jpeg_preview,
+        ),
+        (
+            "jpeg-le-note-mpf-fullhd.jpg",
+            jpeg_file_with_mpf_type(
+                Order::Little,
+                Order::Big,
+                0x01_0002,
+                Some(&exif),
+                Some(&NikonSpec::zf(None)),
+                Some(&preview),
+            ),
+            jpeg_preview,
+        ),
+        (
+            "jpeg-le-note-inside.jpg",
+            jpeg_file(Order::Little, Some(&exif), Some(&nikon_inside), None),
+            jpeg_preview,
+        ),
+        (
+            "jpeg-be-note-inside.jpg",
+            jpeg_file(Order::Big, Some(&exif), Some(&nikon_inside), None),
+            jpeg_preview,
         ),
         (
             "jpeg-le-exif-only.jpg",
@@ -313,7 +342,24 @@ fn synthetic_cases() -> Vec<(&'static str, Vec<u8>, Expectations)> {
             nef_file(Order::Little, &exif, None, Some(&raw_jpeg), 0),
             nef_no_preview,
         ),
+        (
+            "nef-le-ifd0-jpeg.nef",
+            ifd0_jpeg_tiff(Order::Little, &raw_jpeg),
+            nef_no_preview,
+        ),
     ]
+}
+
+/// A NEF-shaped TIFF whose only embedded JPEG sits in IFD0, with no SubIFD.
+/// ExifTool names that range `OtherImageStart`, not `JpgFromRawStart`
+/// (Exif.pm:1152-1157 and :1265-1289).
+fn ifd0_jpeg_tiff(order: Order, jpeg: &[u8]) -> Vec<u8> {
+    let ifd0 = IfdBuilder::new()
+        .ascii(0x010F, "NIKON CORPORATION")
+        .ascii(0x0110, Z_F_MODEL)
+        .blob_offset(0x0201, jpeg)
+        .blob_len(0x0202, jpeg);
+    write_tiff(order, 42, &ifd0, 0).bytes
 }
 
 /// Expectations for a real file, taken from ExifTool's model. Z f files must
@@ -634,7 +680,8 @@ fn check_located(
 }
 
 /// ExifTool's embedded-JPEG preview ranges: the PreviewIFD preview (NEF and
-/// maker note) and the MPF large thumbnail, whose `MPImageType` is 0x010001.
+/// maker note) and each MPF entry whose `MPImageType` has the large-thumbnail
+/// class bits (MPF.pm:206).
 fn preview_references(record: &Map<String, Value>) -> Vec<(u64, u64)> {
     let mut ranges: Vec<(u64, u64)> =
         embedded_jpegs(record, "PreviewImageStart", "PreviewImageLength")
@@ -645,19 +692,26 @@ fn preview_references(record: &Map<String, Value>) -> Vec<(u64, u64)> {
         embedded_jpegs(record, "MPImageStart", "MPImageLength")
             .into_iter()
             .filter(|(group, _)| {
-                reference_u64(record, &format!("{group}:MPImageType")) == Some(MPF_LARGE_THUMBNAIL)
+                reference_u64(record, &format!("{group}:MPImageType"))
+                    .is_some_and(|ty| ty & MPF_CLASS_MASK == MPF_LARGE_THUMBNAIL_CLASS)
             })
             .map(|(_, range)| range),
     );
     ranges
 }
 
-/// ExifTool's full-size JPEG ranges, from whichever group names JpgFromRaw.
+/// ExifTool's full-size JPEG ranges. The same 0x0201/0x0202 pair is
+/// `JpgFromRawStart` only in a SubIFD and `OtherImageStart` elsewhere
+/// (Exif.pm:1152-1157 and :1265-1289), so both names are taken.
 fn full_jpeg_references(record: &Map<String, Value>) -> Vec<(u64, u64)> {
-    embedded_jpegs(record, "JpgFromRawStart", "JpgFromRawLength")
-        .into_iter()
-        .map(|(_, range)| range)
-        .collect()
+    [
+        ("JpgFromRawStart", "JpgFromRawLength"),
+        ("OtherImageStart", "OtherImageLength"),
+    ]
+    .into_iter()
+    .flat_map(|(start, len)| embedded_jpegs(record, start, len))
+    .map(|(_, range)| range)
+    .collect()
 }
 
 /// Each `Group:start_tag` with its `Group:len_tag`, as (group, (offset, len)).

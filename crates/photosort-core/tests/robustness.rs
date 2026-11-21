@@ -111,6 +111,14 @@ fn assert_need_more_bounded(result: &Result<Metadata, ParseError>, file_len: u64
     }
 }
 
+/// Bytes the file holds past the head. Small values cover the common case.
+/// Values up to `4 * MAX_HEAD_LEN` make a `NeedMore` bound and a read past
+/// the head limit reachable. The file length is only a number, so the large
+/// values cost nothing to allocate.
+fn file_extra() -> impl Strategy<Value = u64> {
+    prop_oneof![0..=1_000_000u64, MAX_HEAD_LEN..=4 * MAX_HEAD_LEN]
+}
+
 /// A fixture with 1-8 random byte overwrites and an optional truncation.
 fn mutated_fixture() -> impl Strategy<Value = (FileKind, Vec<u8>)> {
     let count = fixtures().len();
@@ -209,7 +217,7 @@ proptest! {
     #[test]
     fn random_bytes_never_panic_and_ranges_stay_in_bounds(
         head in prop::collection::vec(any::<u8>(), 0..4096),
-        extra in 0..=1_000_000u64,
+        extra in file_extra(),
     ) {
         let file_len = u64::try_from(head.len()).unwrap() + extra;
         for kind in [jpeg::KIND, nef::KIND] {
@@ -222,12 +230,14 @@ proptest! {
     }
 
     /// Valid files with 1-8 byte overwrites and an optional truncation. The
-    /// file length is the length of the bytes that remain, as on disk.
+    /// bytes are the head. The file is `extra` bytes longer, so a mutated
+    /// offset past the head is a `NeedMore`, or a `Malformed` past the head limit.
     #[test]
     fn mutated_valid_files_never_panic_and_ranges_stay_in_bounds(
         (kind, bytes) in mutated_fixture(),
+        extra in file_extra(),
     ) {
-        let file_len = u64::try_from(bytes.len()).unwrap();
+        let file_len = u64::try_from(bytes.len()).unwrap() + extra;
         let result = registry().parse(kind, &bytes, file_len);
         assert_need_more_bounded(&result, file_len);
         if let Ok(meta) = result {
@@ -237,14 +247,17 @@ proptest! {
 
     /// A valid file parsed from a head of random length `k` must converge.
     /// Each `NeedMore` must make progress and stay within the file. Once a
-    /// head gives `Ok`, that result must equal the full parse.
+    /// head gives `Ok`, that result must equal the full parse. The file is
+    /// `extra` bytes longer than the fixture. A valid fixture never needs
+    /// those bytes, so the full parse at that length is the reference.
     #[test]
     fn need_more_converges_to_the_full_parse(
         fixture in 0..fixtures().len(),
         start in any::<prop::sample::Index>(),
+        extra in file_extra(),
     ) {
         let (kind, file) = &fixtures()[fixture];
-        let len = u64::try_from(file.len()).unwrap();
+        let len = u64::try_from(file.len()).unwrap() + extra;
         let full = registry()
             .parse(*kind, file, len)
             .expect("a valid fixture parses from its full bytes");

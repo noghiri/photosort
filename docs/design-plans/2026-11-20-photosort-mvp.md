@@ -276,7 +276,7 @@ A file's identity is built only from fields that lens edits never touch. That wa
 
 `FNumber` and `FocalLength` are deliberately excluded: manual profiles overwrite them on copies.
 
-The DoD names only serial + `ShutterCount` for rung 1. The capture time was added to it because nobody has confirmed whether the Z f's ShutterCount advances on every frame of an electronic-shutter burst, and if it doesn't, burst frames would collide.
+For Nikon, the counter is `ShutterCount` (`0x00A7`, the total of all activations, electronic included), never `MechanicalShutterCount` (`0x0037`). The mechanical count doesn't advance in silent mode, so burst frames would collide. The DoD names only serial + `ShutterCount` for rung 1. Capture time is added as a guard.
 
 The output index stores `(IdentityKey, FileKind)` pairs. A shot is **copied** when every one of its file kinds is present, **partial** when some are present, and **not copied** otherwise.
 
@@ -491,7 +491,7 @@ There aren't any: the repository was empty when this design was written. It intr
   - `formats/jpeg.rs`: APP1 EXIF and MPF preview.
   - `formats/nef.rs`: PreviewIFD preview and `JpgFromRaw`.
   - `formats/orf.rs`: blocked on OM-1 Mark II samples.
-  - `makernotes/nikon.rs`: header and `ShutterCount` → `shot_counter`.
+  - `makernotes/nikon.rs`: header and `ShutterCount` (`0x00A7`, total including electronic; not `0x0037`) → `shot_counter`.
 - `crates/photosort-core/src/identity.rs`: the vendor-neutral identity ladder and its string serialization.
 - `crates/photosort-core/src/model.rs`: the `FileKind`, `Metadata`, `IdentityKey` and `ByteRange` contracts.
 - Synthetic fixture builder (test support in `photosort-core`) and `crates/photosort-core/tests/fixtures/`.
@@ -657,7 +657,12 @@ There aren't any: the repository was empty when this design was written. It intr
 - Nikon maker-note fields (`LensMountType: F-mount`, `LensType: G`) stay as the camera wrote them. If DxO keys on those, rewriting ExifIFD fields won't be enough.
 - Before starting Phase 8, hand-edit `LensModel`/`LensMake` on a scratch copy of a Fringer shot with ExifTool and open it in PhotoLab.
 
-**Z f burst behaviour is unverified.** ExifTool's docs say `ShutterCount` "includes both mechanical and electronic shutter activations for models with this feature." Nobody has confirmed whether the Z f counts every C30/C120 frame. That's why rung 1 of the ladder includes capture time. Verify it in Phase 2 with a short burst sample.
+**Z f shot counter: use `0x00A7 ShutterCount`, never `0x0037 MechanicalShutterCount`.**
+- ExifTool's Nikon tag docs say `ShutterCount` "includes both mechanical and electronic shutter activations for models with this feature."
+- The user reports that in silent (electronic-shutter) bursts, the total count advances on every frame and the mechanical count doesn't. The user shoots mostly in silent mode, so the mechanical count would make burst frames collide.
+- The Z f samples show both counters (e.g. 75036/10438 and 75043/10445, in electronic-front-curtain mode).
+- Capture time stays in rung 1 anyway, as a cheap guard against firmware quirks.
+- The Phase 2 oracle test should include a few silent-mode burst frames.
 
 **`SubSecTimeOriginal` has hundredth-of-a-second precision** on the Z f samples. Rung 2 could collide for frames under 10 ms apart that also share ISO and exposure. That doesn't affect Nikon files, which use rung 1.
 

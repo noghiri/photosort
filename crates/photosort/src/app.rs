@@ -969,6 +969,9 @@ mod tests {
         output.textures_delta.clear();
         // The drawn pass is logged by the logic call that follows it.
         eframe::App::logic(&mut app, &ctx, &mut frame);
+        // A logic-only frame after the drawn one writes nothing: the flag was
+        // taken by the logic call above.
+        eframe::App::logic(&mut app, &ctx, &mut frame);
         drop(app);
 
         writer.join().expect("the writer ends");

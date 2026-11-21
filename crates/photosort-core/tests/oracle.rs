@@ -6,8 +6,9 @@
 //!   (both byte orders, with and without the Nikon maker note) into a temp
 //!   directory. It needs `PHOTOSORT_EXIFTOOL`.
 //! - `oracle_samples_match_exiftool` checks a folder of real files, recursively.
-//!   It needs `PHOTOSORT_EXIFTOOL` and `PHOTOSORT_SAMPLES`, and fails if the
-//!   folder holds no `.jpg`, `.jpeg` or `.nef` files.
+//!   It needs `PHOTOSORT_EXIFTOOL` and `PHOTOSORT_SAMPLES`. It fails if the
+//!   folder holds no `.jpg`, `.jpeg` or `.nef` files, and also if it holds no
+//!   same-stem JPEG+NEF pair: the AC4.5 identity check would then verify nothing.
 //!
 //! Both tests panic when a variable is unset or names a missing path. Neither
 //! passes early. Run them with:

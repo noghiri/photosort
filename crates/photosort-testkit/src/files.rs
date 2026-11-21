@@ -149,7 +149,9 @@ pub fn nef_file(
         padding,
         &free_preview,
     );
-    let mn_at = maker_note_offset(&first);
+    // Without a maker note there is no MakerNote value to locate, so the
+    // layout is final after pass 1.
+    let mn_at = nikon.map(|_| maker_note_offset(&first));
     let preview_abs = if free_preview.is_empty() {
         None
     } else {
@@ -158,7 +160,10 @@ pub fn nef_file(
     };
 
     // Pass 2: the real maker note, now that the preview's position is known.
-    let mn = nikon.map(|n| nikon_maker_note(order, n, preview_abs, mn_at));
+    let mn = match (nikon, mn_at) {
+        (Some(n), Some(at)) => Some(nikon_maker_note(order, n, preview_abs, at)),
+        _ => None,
+    };
     let last = write_tiff_with_blobs(
         order,
         TIFF_MAGIC,
@@ -166,7 +171,9 @@ pub fn nef_file(
         padding,
         &free_preview,
     );
-    debug_assert_eq!(maker_note_offset(&last), mn_at);
+    if let Some(at) = mn_at {
+        debug_assert_eq!(maker_note_offset(&last), at);
+    }
     last.bytes
 }
 

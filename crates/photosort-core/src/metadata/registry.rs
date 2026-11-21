@@ -3,6 +3,7 @@
 // pattern: Functional Core
 
 use crate::metadata::formats::jpeg::JpegReader;
+use crate::metadata::formats::nef::NefReader;
 use crate::metadata::makernotes::nikon::NikonMakerNotes;
 use crate::metadata::tiff::ByteOrder;
 use crate::model::{ByteRange, FileKind, Metadata, ParseError};
@@ -85,12 +86,14 @@ impl Registry {
         Self::default()
     }
 
-    /// Holds the built-in readers: `JpegReader` and `NikonMakerNotes`. The
-    /// NEF format reader is registered when it lands.
+    /// Holds the built-in readers: the JPEG and NEF format readers and the
+    /// Nikon maker notes.
     #[must_use]
     pub fn with_builtin() -> Self {
         let mut reg = Self::empty();
         reg.register_format(Box::new(JpegReader))
+            .expect("built-in readers have distinct kinds and extensions");
+        reg.register_format(Box::new(NefReader))
             .expect("built-in readers have distinct kinds and extensions");
         reg.register_makernote(Box::new(NikonMakerNotes));
         reg
@@ -291,6 +294,17 @@ mod tests {
             makernotes: &reg.makernotes,
         };
         assert!(input.makernote_for("NIKON CORPORATION").is_some());
+    }
+
+    #[test]
+    fn with_builtin_finds_nef_by_extension_in_any_case() {
+        let reg = Registry::with_builtin();
+        assert!(reg.format_for_extension("NEF").is_some());
+        assert!(reg.format_for_extension(".nef").is_some());
+        assert!(
+            reg.format_for_kind(crate::metadata::formats::nef::KIND)
+                .is_some()
+        );
     }
 
     #[test]

@@ -112,7 +112,7 @@ pub(crate) fn load_full(path: &Path, source: &FullSource, target: Option<[u32; 2
 ```
 
 `decode_full`:
-1. `jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes))`, then `read_info()`. Then read `info()` and return `Err(PreviewError::Decode(image::ImageError::Limits(image::error::LimitErrorKind::DimensionError.into())))` if its width or height is greater than `DECODE_MAX_SIDE` (16,384). That constant is private to `preview.rs`, and `decode_full` lives in the same file, so it can use it directly. This check is the only dimension limit on this path. Do not rely on `jpeg-decoder` to enforce one, and do not rely on `decode_limits()`, which `decode_full` does not use.
+1. `jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes))`, then `read_info()`. Then read `info()` and return `Err(PreviewError::Decode(image::ImageError::Limits(image::error::LimitErrorKind::DimensionError.into())))` if its width or height is greater than `DECODE_MAX_SIDE` (16,384). That constant is private to `preview.rs`, and `decode_full` lives in the same file, so it can use it directly. This check is the only dimension limit on this path. Do not rely on `jpeg-decoder` to enforce one, and do not rely on `decode_limits()`, which `decode_full` does not use. Then bound memory the same way the preview path does: call `decoder.set_max_decoding_buffer_size(DECODE_MAX_ALLOC as usize)` before `decode()` (jpeg-decoder 0.3.2 `decoder.rs:163`; its default is `usize::MAX`, and it checks the limit against the scaled output size). Legitimate full-size decodes fit comfortably: 6048×4032 RGB is about 73 MB.
 2. If `target` is set, swap its axes for orientations 5-8 (they rotate 90°), then call `decoder.scale(w, h)` with values clamped to `u16`.
 3. `decode()`, then convert by `info().pixel_format`:
    - `RGB24` → RGB;
@@ -127,13 +127,18 @@ pub(crate) fn load_full(path: &Path, source: &FullSource, target: Option<[u32; 2
 
 It then calls `decode_full`. A `PreviewOnly` source ignores `target` (it is already small).
 
+Errors: `PreviewError` currently has only `Decode(#[from] image::ImageError)`, and `?` will not convert the other two error types on this path. Add two variants so each failure keeps its own message:
+- `#[error("full image does not decode: {0}")] Jpeg(#[from] jpeg_decoder::Error)`, for `read_info()`, `scale()` and `decode()` (including the buffer-size limit above);
+- `#[error("cannot read the image: {0}")] Io(#[from] std::io::Error)`, for `std::fs::read` and `read_range` in `load_full`.
+
 **Testing** (unit tests, with `testkit::tiny_jpeg(1200, 800)` and a testkit NEF):
 - `target = Some([300, 200])` → 300×200 (1/4 scale).
 - `Some([301, 201])` → 600×400 (1/4 would give 300×200, which meets neither axis, so 1/2 is chosen).
 - `None` → 1200×800.
 - Orientation 6 with target `[200, 300]` → 200×300.
 - AC3.4: `load_full` on a NEF-only temp file with `Embedded` → the JpgFromRaw size (1200×800 in the fixture).
-- AC3.6: corrupt bytes, or a range past EOF → `Err`, no panic.
+- AC3.6: corrupt bytes → `Err(PreviewError::Jpeg(..))`; a range past EOF in `load_full` → `Err(PreviewError::Io(..))`; no panic.
+- The buffer-size limit is set, but not unit-tested: a valid JPEG whose output exceeds 256 MiB while staying under 16,384 px a side needs roughly 270 million pixels, which is too slow to encode in a unit test. Accepted gap; the code review checks that the call is present.
 - `tiny_jpeg(DECODE_MAX_SIDE + 1, 8)` → `Err` from `decode_full` before any pixel decoding. The image is 8 px high (about 16k × 8 pixels), so the test stays cheap.
 - AC3.6: a `tiny_jpeg` whose SOS marker (`FF DA`) is overwritten with `FF D9` → `decode_full` returns `Err` (the same corruption `gen_card` uses for `BRKN_0001.JPG` in Task 6).
 

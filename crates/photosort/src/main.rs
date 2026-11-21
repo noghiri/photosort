@@ -4,6 +4,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
+mod budget;
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
+mod cache;
 
 use eframe::egui;
 

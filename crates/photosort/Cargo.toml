@@ -12,3 +12,14 @@ workspace = true
 [dependencies]
 photosort-core = { workspace = true }
 eframe = { workspace = true }
+walkdir = { workspace = true }
+quick_cache = { workspace = true }
+rfd = { workspace = true }
+image = { workspace = true }
+thiserror = { workspace = true }
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+photosort-testkit = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }

@@ -138,11 +138,7 @@ fn scan_segments(input: &ParseInput<'_>, segments: &mut Segments) -> Result<(), 
         // A segment whose declared end is past EOF is truncated. Its bytes can
         // never arrive, so it is `Malformed`, not `NeedMore`. The check uses
         // `file_len`, not `head.len()`, so a short head still asks for more.
-        if length_at
-            .checked_add(u64::from(len))
-            .ok_or(OVERFLOW)?
-            > input.file_len
-        {
+        if length_at.checked_add(u64::from(len)).ok_or(OVERFLOW)? > input.file_len {
             return Err(ParseError::Malformed {
                 what: "jpeg segment past end of file",
             });

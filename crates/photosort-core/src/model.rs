@@ -1,6 +1,9 @@
 //! Data contracts that cross phase boundaries: file kinds, parsed
-//! metadata, byte ranges and identity keys.
+//! metadata, byte ranges, identity keys and shots.
 // pattern: Functional Core
+
+use std::path::PathBuf;
+use std::time::SystemTime;
 
 /// A file format, identified by a registered reader. Data, not a closed
 /// vendor enum: new raw formats add a reader, not a variant.
@@ -115,6 +118,43 @@ pub enum IdentityKey {
         size: u64,
         head_blake3: [u8; 32],
     },
+}
+
+/// Stable within one scan; index into the scan's shot list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ShotId(pub u32);
+
+/// A file found by the directory listing, before grouping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedFile {
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified: SystemTime,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShotFile {
+    /// Absolute path on the source volume.
+    pub path: PathBuf,
+    pub kind: FileKind,
+    pub size: u64,
+    pub modified: SystemTime,
+    /// `None` until pass 2 parses it.
+    pub meta: Option<Metadata>,
+    pub identity: Option<IdentityKey>,
+    /// Set when pass 2 could not read or parse the file.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shot {
+    pub id: ShotId,
+    /// Source directory.
+    pub dir: PathBuf,
+    /// Filename stem, original case.
+    pub stem: String,
+    /// 1..=2 files, at most one per `FileKind`.
+    pub files: Vec<ShotFile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

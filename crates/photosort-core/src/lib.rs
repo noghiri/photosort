@@ -9,6 +9,7 @@
 #![deny(clippy::indexing_slicing)]
 #![cfg_attr(test, allow(clippy::indexing_slicing))]
 
+pub mod grouping;
 pub mod identity;
 pub mod metadata;
 pub mod model;

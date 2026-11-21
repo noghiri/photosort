@@ -98,11 +98,26 @@ pub fn jpeg_file(
 
 /// As `jpeg_file`, with the MPF TIFF in `mpf_order`. `jpeg_file` writes a
 /// big-endian MPF block; this lets a test write a little-endian one, and
-/// with a byte order that differs from the Exif block's.
+/// with a byte order that differs from the Exif block's. The preview is a
+/// VGA large thumbnail (MPImageType 0x010001).
 #[must_use]
 pub fn jpeg_file_with_mpf_order(
     order: Order,
     mpf_order: Order,
+    exif: Option<&ExifSpec>,
+    nikon: Option<&NikonSpec>,
+    mpf_preview: Option<&[u8]>,
+) -> Vec<u8> {
+    jpeg_file_with_mpf_type(order, mpf_order, 0x01_0001, exif, nikon, mpf_preview)
+}
+
+/// As `jpeg_file_with_mpf_order`, with the preview entry's MPImageType set to
+/// `preview_type`. 0x010002 is the full-HD large thumbnail (ExifTool MPF.pm:128-132).
+#[must_use]
+pub fn jpeg_file_with_mpf_type(
+    order: Order,
+    mpf_order: Order,
+    preview_type: u32,
     exif: Option<&ExifSpec>,
     nikon: Option<&NikonSpec>,
     mpf_preview: Option<&[u8]>,
@@ -117,7 +132,7 @@ pub fn jpeg_file_with_mpf_order(
 
     if let Some(preview) = mpf_preview {
         // Pass 1: the MPF block's length does not depend on its offsets.
-        let zero_block = mpf_block(mpf_order, 0, 0, 0);
+        let zero_block = mpf_block(mpf_order, 0, 0, 0, preview_type);
         let app2_len = 2 + 2 + 4 + zero_block.len();
         let primary_len = 2 + app1.len() + app2_len + body.len();
         // Offsets are measured from the MM byte: APP2 marker, length and "MPF\0" come first.
@@ -129,6 +144,7 @@ pub fn jpeg_file_with_mpf_order(
             count(primary_len),
             count(preview.len()),
             count(rel),
+            preview_type,
         ));
         out.extend(segment(0xE2, &app2_payload));
         out.extend(&body);
@@ -225,8 +241,15 @@ fn segment(marker: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 /// The MPF TIFF in `order`. Its primary entry names the primary image
-/// and its preview entry names the appended preview at `preview_rel`.
-fn mpf_block(order: Order, primary_len: u32, preview_len: u32, preview_rel: u32) -> Vec<u8> {
+/// and its preview entry names the appended preview at `preview_rel`, with
+/// the MPImageType `preview_type`.
+fn mpf_block(
+    order: Order,
+    primary_len: u32,
+    preview_len: u32,
+    preview_rel: u32,
+    preview_type: u32,
+) -> Vec<u8> {
     // Each MP entry is 16 bytes (phase plan Task 7: N x 16-byte entries in a
     // 32-byte 0xB002 for two images): attribute, size, offset, then two
     // 16-bit dependent-image offsets, which are zero here.
@@ -234,7 +257,7 @@ fn mpf_block(order: Order, primary_len: u32, preview_len: u32, preview_rel: u32)
     for v in [0x0003_0000, primary_len, 0, 0] {
         index.extend(enc32(order, v));
     }
-    for v in [0x0001_0001, preview_len, preview_rel, 0] {
+    for v in [preview_type, preview_len, preview_rel, 0] {
         index.extend(enc32(order, v));
     }
     let ifd0 = IfdBuilder::new()

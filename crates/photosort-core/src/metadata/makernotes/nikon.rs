@@ -172,4 +172,23 @@ mod tests {
         assert_eq!(meta.serial, None);
         assert_eq!(meta.make.as_deref(), Some("ACME"));
     }
+
+    #[test]
+    fn type_1_header_leaves_vendor_fields_absent_and_parse_succeeds() {
+        let mut file = nef_file(
+            Order::Little,
+            &ExifSpec::zf(),
+            Some(&NikonSpec::zf(None)),
+            None,
+            0,
+        );
+        let header_at = file
+            .windows(7)
+            .position(|w| w == b"Nikon\0\x02")
+            .expect("type 3 header is written");
+        file[header_at + 6] = 0x01;
+        let meta = read_nef(&file);
+        assert_eq!(meta.shot_counter, None);
+        assert_eq!(meta.serial.as_deref(), Some("1234567"));
+    }
 }

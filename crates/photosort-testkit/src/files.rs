@@ -79,8 +79,13 @@ pub fn nikon_maker_note(
 ///
 /// Without `exif`, no APP1 is written and `nikon` is ignored. The primary
 /// image is `tiny_jpeg(16, 16)`. With `mpf_preview`, the preview is appended
-/// after it and indexed from the MPF block. A PreviewIFD is never written
-/// into a JPEG's maker note, so `nikon.preview_jpeg` is ignored here.
+/// after it and indexed from the MPF block.
+///
+/// The maker note's preview depends on `nikon.preview_inside`. When true, the
+/// preview bytes sit inside the note and a PreviewIFD points at them, so
+/// `nikon.preview_jpeg` is written. When false, no PreviewIFD is written:
+/// a JPEG has no place for an outside preview, so `nikon.preview_jpeg` is
+/// ignored in that case.
 #[must_use]
 pub fn jpeg_file(
     order: Order,
@@ -178,6 +183,7 @@ pub fn nef_file(
 }
 
 /// A minimal TIFF with IFD0 and an Exif IFD, for non-JPEG, non-NEF formats.
+/// The maker note follows the same `preview_inside` rule as `jpeg_file`.
 #[must_use]
 pub fn tiff_file(order: Order, magic: u16, exif: &ExifSpec, nikon: Option<&NikonSpec>) -> Vec<u8> {
     let mn = nikon.map(|n| nikon_maker_note(order, n, None, 0));

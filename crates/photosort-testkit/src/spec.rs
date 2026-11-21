@@ -34,8 +34,9 @@ pub struct NikonSpec {
     pub shutter_count: Option<u32>,    // 0x00A7 LONG
     pub preview_jpeg: Option<Vec<u8>>, // via PreviewIFD 0x0011
     /// true: preview bytes stored inside the MakerNote value (its count covers them);
-    /// false: preview stored after the TIFF content. Real Z f layout is unverified,
-    /// so tests exercise both.
+    /// false: preview stored after the TIFF content. In a NEF the outside preview
+    /// is a free blob. In a JPEG or TIFF there is nowhere to put it, so the
+    /// PreviewIFD is omitted. Real Z f layout is unverified, so tests exercise both.
     pub preview_inside: bool,
 }
 

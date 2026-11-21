@@ -484,4 +484,19 @@ mod tests {
             Err(ParseError::NeedMore { .. })
         ));
     }
+
+    /// MPF found with no Exif APP1, then a corrupt marker. The walk error must
+    /// keep the MPF base, so the preview survives. The corrupt byte is the
+    /// first marker after the MPF segment, which makes the walk fail with
+    /// `Malformed`, not `NeedMore`.
+    #[test]
+    fn mpf_is_kept_when_a_later_marker_is_corrupt_and_there_is_no_exif() {
+        let preview = tiny_jpeg(320, 212);
+        let file = jpeg_file(Order::Little, None, None, Some(&preview));
+        let mut corrupt = file.clone();
+        corrupt[segment_end(&file, 0xE2)] = 0x00;
+        let clean = read_jpeg(&file).unwrap();
+        assert!(clean.preview.is_some(), "the clean file has an MPF preview");
+        assert_eq!(read_jpeg(&corrupt), Ok(clean));
+    }
 }

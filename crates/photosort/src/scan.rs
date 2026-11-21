@@ -5,6 +5,7 @@
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::num::NonZero;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -20,7 +21,7 @@ use photosort_core::model::{
 use walkdir::WalkDir;
 
 use crate::cache::PreviewBytes;
-use crate::preview::{DecodedImage, decode_preview, read_range};
+use crate::preview::{DecodedImage, TILE_TEXTURE_MAX, decode_preview, read_range};
 use crate::scan_queue::{Job, JobQueue};
 
 /// Calls the UI's repaint hook. Every event send is followed by one call.
@@ -84,22 +85,8 @@ pub(crate) enum ScanError {
 
 /// Walks `root` and groups the registered image files into shots. Entries
 /// that cannot be read are returned as `skipped` messages, and the walk goes on.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "test-only wrapper; the lister calls the cancellable list_source_until"
-    )
-)]
-pub(crate) fn list_source(
-    root: &Path,
-    registry: &Registry,
-) -> Result<(Vec<Shot>, Vec<String>), ScanError> {
-    list_source_until(root, registry, || false)
-}
-
-/// As `list_source`, but stops walking as soon as `stopped` returns true and
-/// returns whatever was listed so far.
+/// It stops as soon as `stopped` returns true and returns whatever was listed
+/// so far.
 fn list_source_until(
     root: &Path,
     registry: &Registry,
@@ -207,20 +194,40 @@ fn parse_head(
         match registry.parse(kind, &head.bytes, head.file_len) {
             Ok(meta) => return Ok(meta),
             Err(ParseError::NeedMore { needed, .. }) => {
-                let next = next_head_len(needed, head.file_len);
                 let have = u64::try_from(head.bytes.len()).unwrap_or(u64::MAX);
-                if next <= have {
-                    return Err(format!(
-                        "header is cut off after {} bytes",
-                        head.bytes.len()
-                    ));
+                if let Some(message) = unsatisfiable_need(needed, have, head.file_len) {
+                    return Err(message);
                 }
-                want = next;
+                want = next_head_len(needed, head.file_len);
             }
             Err(err) => return Err(err.to_string()),
         }
     }
     Err(format!("header needs more than {MAX_PARSE_ATTEMPTS} reads"))
+}
+
+/// Why a `NeedMore` for `needed` bytes cannot be met by reading more, or
+/// `None` when a longer read can. The built-in readers keep `needed` within
+/// the file and `MAX_HEAD_LEN` (`bytes_within` reports anything past either as
+/// `Malformed`), so the first two messages come only from a reader that does
+/// not use that helper.
+fn unsatisfiable_need(needed: u64, have: u64, file_len: u64) -> Option<String> {
+    if needed > MAX_HEAD_LEN {
+        Some(format!(
+            "header is larger than the {MAX_HEAD_LEN}-byte head limit"
+        ))
+    } else if needed > file_len {
+        Some(format!(
+            "header is cut off: the file is {file_len} bytes but the header needs {needed}"
+        ))
+    } else if needed <= have {
+        // The reader asked for bytes it already has, so another read cannot help.
+        Some(format!(
+            "reader asked for {needed} bytes after {have} were read"
+        ))
+    } else {
+        None
+    }
 }
 
 /// Grows `head` to `want` bytes from the start of the file. Bytes already read
@@ -355,7 +362,20 @@ impl Scanner {
         waker: Waker,
         generation: u64,
     ) -> (Scanner, Receiver<ScanEvent>) {
-        let (tx, rx) = mpsc::sync_channel(EVENT_CAPACITY);
+        Self::start_with_capacity(root, registry, bytes, waker, generation, EVENT_CAPACITY)
+    }
+
+    /// As `start`, with the event queue's capacity given. Only `start` passes
+    /// `EVENT_CAPACITY`; tests pass a small queue to fill it.
+    fn start_with_capacity(
+        root: PathBuf,
+        registry: Arc<Registry>,
+        bytes: Arc<PreviewBytes>,
+        waker: Waker,
+        generation: u64,
+        capacity: usize,
+    ) -> (Scanner, Receiver<ScanEvent>) {
+        let (tx, rx) = mpsc::sync_channel(capacity);
         let ctx = Ctx {
             shared: Arc::new(Shared::default()),
             tx,
@@ -468,7 +488,8 @@ fn parse_jobs(shots: &[Shot]) -> Vec<Job> {
 }
 
 /// Runs jobs until the scan stops. The worker that finishes the last parse of
-/// the pass sends `ParsePassDone`.
+/// the pass sends `ParsePassDone`. A panicking job reports an error, so the
+/// pass still finishes and the tile does not wait forever.
 fn run_worker(ctx: &Ctx) {
     while let Some(job) = ctx.shared.next_job() {
         let sent = match job {
@@ -478,12 +499,16 @@ fn run_worker(ctx: &Ctx) {
                 path,
                 kind,
             } => {
-                let outcome = Box::new(parse_file(&path, kind, &ctx.registry));
+                let outcome = catch_panic(|| parse_file(&path, kind, &ctx.registry))
+                    .unwrap_or_else(|message| FileOutcome {
+                        meta: Err(message),
+                        identity: None,
+                    });
                 let parsed = ctx.emit(ScanEvent::FileParsed {
                     generation: ctx.generation,
                     shot,
                     file,
-                    outcome,
+                    outcome: Box::new(outcome),
                 });
                 parsed
                     && (!ctx.shared.finish_parse()
@@ -496,16 +521,34 @@ fn run_worker(ctx: &Ctx) {
                 path,
                 range,
                 orientation,
-            } => ctx.emit(ScanEvent::Preview {
-                generation: ctx.generation,
-                shot,
-                result: load_preview(&ctx.bytes, shot, &path, range, orientation),
-            }),
+            } => {
+                let result =
+                    catch_panic(|| load_preview(&ctx.bytes, shot, &path, range, orientation))
+                        .and_then(std::convert::identity);
+                ctx.emit(ScanEvent::Preview {
+                    generation: ctx.generation,
+                    shot,
+                    result,
+                })
+            }
         };
         if !sent {
             return;
         }
     }
+}
+
+/// Runs one job body. A panic in it becomes an error message, so the job
+/// still reports its outcome.
+fn catch_panic<T>(body: impl FnOnce() -> T) -> Result<T, String> {
+    panic::catch_unwind(AssertUnwindSafe(body)).map_err(|payload| {
+        let detail = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("no message");
+        format!("worker panicked: {detail}")
+    })
 }
 
 /// Decodes a shot's preview, reading its bytes from disk on a cache miss and
@@ -527,7 +570,7 @@ fn load_preview(
             encoded
         }
     };
-    decode_preview(&encoded, orientation).map_err(|e| e.to_string())
+    decode_preview(&encoded, orientation, Some(TILE_TEXTURE_MAX)).map_err(|e| e.to_string())
 }
 
 impl Drop for Scanner {
@@ -747,7 +790,8 @@ mod tests {
         write_file(&dir.path().join("nested/deeper/C.jpeg"), &bytes);
         write_file(&dir.path().join("nested/deeper/D.NeF"), &bytes);
 
-        let (shots, skipped) = list_source(dir.path(), &Registry::with_builtin()).expect("lists");
+        let (shots, skipped) =
+            list_source_until(dir.path(), &Registry::with_builtin(), || false).expect("lists");
 
         assert!(skipped.is_empty());
         let mut names: Vec<String> = shots.iter().map(Shot::display_name).collect();
@@ -758,8 +802,10 @@ mod tests {
     #[test]
     fn a_missing_source_is_a_scan_error() {
         let dir = tempdir().expect("temp dir");
-        let err = list_source(&dir.path().join("gone"), &Registry::with_builtin())
-            .expect_err("no such folder");
+        let err = list_source_until(&dir.path().join("gone"), &Registry::with_builtin(), || {
+            false
+        })
+        .expect_err("no such folder");
         assert!(matches!(err, ScanError::Root { .. }));
     }
 
@@ -768,7 +814,8 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         let file = dir.path().join("DSC_0001.JPG");
         write_file(&file, &jpeg_with_exif());
-        let err = list_source(&file, &Registry::with_builtin()).expect_err("a file");
+        let err =
+            list_source_until(&file, &Registry::with_builtin(), || false).expect_err("a file");
         assert!(matches!(err, ScanError::NotADirectory { .. }));
     }
 
@@ -782,7 +829,8 @@ mod tests {
         write_file(&dir.path().join("DSC_0001.dop"), b"dop");
         write_file(&dir.path().join("DSC_0002.JPG"), &jpeg_with_exif());
 
-        let (shots, _) = list_source(dir.path(), &Registry::with_builtin()).expect("lists");
+        let (shots, _) =
+            list_source_until(dir.path(), &Registry::with_builtin(), || false).expect("lists");
 
         assert_eq!(shots.len(), 1);
         assert_eq!(shots[0].display_name(), "DSC_0002.JPG");
@@ -806,7 +854,7 @@ mod tests {
         let registry = Registry::with_builtin();
 
         let started = Instant::now();
-        let (shots, skipped) = list_source(dir.path(), &registry).expect("lists");
+        let (shots, skipped) = list_source_until(dir.path(), &registry, || false).expect("lists");
         let elapsed = started.elapsed();
 
         eprintln!("list_source over 7,000 shots took {elapsed:?}");
@@ -1146,5 +1194,209 @@ mod tests {
 
         // Each thread holds the waker. Once every thread has exited, it is dropped.
         wait_until("every scan thread to exit", || probe.upgrade().is_none());
+    }
+
+    /// Once the pass is done the workers sit idle in `Condvar::wait`, and the
+    /// receiver is still alive, so only the stop flag can wake them.
+    #[test]
+    fn dropping_only_the_scanner_stops_the_idle_workers() {
+        let dir = tempdir().expect("temp dir");
+        for number in 1..=3 {
+            write_file(
+                &dir.path().join(format!("DSC_{number:04}.JPG")),
+                &jpeg_with_exif(),
+            );
+        }
+        let (scanner, rx, wakes) = start_scan(dir.path(), Arc::new(Registry::with_builtin()));
+        let probe = Arc::downgrade(&wakes);
+        drop(wakes);
+        receive_until(&rx, is_parse_pass_done);
+
+        drop(scanner);
+
+        wait_until("the idle workers to exit", || probe.upgrade().is_none());
+        drop(rx);
+    }
+
+    /// With the queue full and nobody draining it, the workers block in `send`.
+    /// Dropping the scanner must still return, and the threads exit once the
+    /// receiver is gone.
+    #[test]
+    fn a_full_queue_does_not_block_dropping_the_scanner() {
+        let dir = tempdir().expect("temp dir");
+        for number in 1..=50 {
+            write_file(
+                &dir.path().join(format!("DSC_{number:04}.JPG")),
+                &jpeg_with_exif(),
+            );
+        }
+        let (waker, wakes) = counting_waker();
+        let bytes = Arc::new(preview_bytes(&CacheSplit {
+            bytes: 64 * MIB,
+            textures: 0,
+        }));
+        let (scanner, rx) = Scanner::start_with_capacity(
+            dir.path().to_path_buf(),
+            Arc::new(Registry::with_builtin()),
+            bytes,
+            waker,
+            7,
+            2,
+        );
+        let probe = Arc::downgrade(&wakes);
+        receive_until(&rx, |e| matches!(e, ScanEvent::Listed { .. }));
+        // One event is taken, and each send wakes once after it lands. Three
+        // wakes therefore mean the two-slot queue holds two events.
+        wait_until("the queue to fill", || wakes.load(Ordering::SeqCst) >= 3);
+
+        drop(scanner);
+        drop(wakes);
+        drop(rx);
+
+        wait_until("every scan thread to exit", || probe.upgrade().is_none());
+    }
+
+    /// A format whose parse panics. Registered only in tests.
+    struct PanickingReader;
+
+    impl FormatReader for PanickingReader {
+        fn kind(&self) -> FileKind {
+            FileKind("pnc")
+        }
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &["pnc"]
+        }
+
+        fn badge(&self) -> &'static str {
+            "P"
+        }
+
+        fn is_raw(&self) -> bool {
+            false
+        }
+
+        fn header_len_hint(&self) -> usize {
+            16 * 1024
+        }
+
+        fn parse(&self, _input: &ParseInput<'_>) -> Result<Metadata, ParseError> {
+            panic!("reader exploded")
+        }
+
+        fn lens_write_supported(&self) -> bool {
+            false
+        }
+    }
+
+    /// A format that always asks for `needed` bytes. Registered only in tests.
+    struct NeedsMoreReader {
+        needed: u64,
+    }
+
+    impl FormatReader for NeedsMoreReader {
+        fn kind(&self) -> FileKind {
+            FileKind("nmr")
+        }
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &["nmr"]
+        }
+
+        fn badge(&self) -> &'static str {
+            "N"
+        }
+
+        fn is_raw(&self) -> bool {
+            false
+        }
+
+        fn header_len_hint(&self) -> usize {
+            16 * 1024
+        }
+
+        fn parse(&self, input: &ParseInput<'_>) -> Result<Metadata, ParseError> {
+            Err(ParseError::NeedMore {
+                needed: self.needed,
+                have: u64::try_from(input.head.len()).expect("fits"),
+            })
+        }
+
+        fn lens_write_supported(&self) -> bool {
+            false
+        }
+    }
+
+    /// The error text for a file of `file_bytes` whose reader asks for `needed`.
+    fn need_more_error(needed: u64, file_bytes: &[u8]) -> String {
+        let mut registry = Registry::with_builtin();
+        registry
+            .register_format(Box::new(NeedsMoreReader { needed }))
+            .expect("nmr is free");
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("DSC_0001.nmr");
+        write_file(&path, file_bytes);
+        parse_file(&path, FileKind("nmr"), &registry)
+            .meta
+            .expect_err("the header cannot be read")
+    }
+
+    #[test]
+    fn a_header_larger_than_the_head_limit_says_so() {
+        let message = need_more_error(MAX_HEAD_LEN + 1, &[0; 100]);
+        assert!(message.contains("larger than the"), "{message}");
+        assert!(message.contains("head limit"), "{message}");
+        assert!(!message.contains("cut off"), "{message}");
+    }
+
+    #[test]
+    fn a_header_that_runs_past_the_file_says_it_is_cut_off() {
+        let message = need_more_error(200, &[0; 100]);
+        assert!(message.contains("cut off"), "{message}");
+        assert!(message.contains("100 bytes"), "{message}");
+    }
+
+    #[test]
+    fn a_reader_asking_for_bytes_it_already_has_is_reported_as_such() {
+        let message = need_more_error(50, &[0; 100]);
+        assert!(message.contains("asked for 50 bytes"), "{message}");
+        assert!(!message.contains("cut off"), "{message}");
+    }
+
+    #[test]
+    fn catch_panic_turns_a_panic_into_its_message() {
+        assert_eq!(catch_panic(|| 7), Ok(7));
+        assert_eq!(
+            catch_panic(|| -> u8 { panic!("boom") }),
+            Err("worker panicked: boom".to_owned())
+        );
+        assert_eq!(
+            catch_panic(|| -> u8 { panic!("{}", "formatted") }),
+            Err("worker panicked: formatted".to_owned())
+        );
+    }
+
+    /// A panicking parse still reports, so the pass ends and the other shots parse.
+    #[test]
+    fn a_panicking_parse_reports_an_error_and_the_pass_still_ends() {
+        let mut registry = Registry::with_builtin();
+        registry
+            .register_format(Box::new(PanickingReader))
+            .expect("pnc is free");
+        let dir = tempdir().expect("temp dir");
+        write_file(&dir.path().join("DSC_0001.pnc"), b"x");
+        write_file(&dir.path().join("DSC_0002.JPG"), &jpeg_with_exif());
+
+        let (_scanner, rx, _) = start_scan(dir.path(), Arc::new(registry));
+        let events = receive_until(&rx, is_parse_pass_done);
+
+        assert_eq!(parse_pass_done_count(&events), 1);
+        let panicked = outcome_by_name(&events, "DSC_0001.pnc");
+        assert!(
+            matches!(&panicked.meta, Err(message) if message == "worker panicked: reader exploded"),
+            "{:?}",
+            panicked.meta
+        );
+        assert!(outcome_by_name(&events, "DSC_0002.JPG").meta.is_ok());
     }
 }

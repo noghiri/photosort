@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 use eframe::egui;
@@ -15,7 +15,7 @@ use photosort_core::model::{Shot, ShotId};
 
 use crate::budget::{CacheSplit, cache_budget_bytes, split};
 use crate::cache::{PreviewBytes, Textures, physical_ram, preview_bytes, textures};
-use crate::frame_log;
+use crate::frame_log::{self, FrameLog};
 use crate::preview::{DecodedImage, to_color_image};
 use crate::scan::{ScanEvent, Scanner, Waker};
 use crate::scan_model::{
@@ -72,14 +72,14 @@ pub(crate) struct PhotosortApp {
     /// The grid's layout from the last frame, used to keep focus in view.
     pub(crate) grid_layout: GridLayout,
     pub(crate) waker: Waker,
-    pub(crate) frame_log: Option<SyncSender<String>>,
+    pub(crate) frame_log: Option<FrameLog>,
+    /// Set by each drawn `ui` pass and read by the next `logic` call. `logic`
+    /// also runs while the window is hidden, and those frames are not logged.
+    pub(crate) painted: bool,
 }
 
 impl PhotosortApp {
-    pub(crate) fn new(
-        cc: &eframe::CreationContext<'_>,
-        frame_log: Option<SyncSender<String>>,
-    ) -> Self {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>, frame_log: Option<FrameLog>) -> Self {
         // Ctrl+scroll is ours, and egui's own Ctrl+/- zoom would fight it.
         cc.egui_ctx
             .options_mut(|options| options.zoom_with_keyboard = false);
@@ -90,7 +90,7 @@ impl PhotosortApp {
         Self::build(waker, frame_log, ram)
     }
 
-    fn build(waker: Waker, frame_log: Option<SyncSender<String>>, ram: u64) -> Self {
+    fn build(waker: Waker, frame_log: Option<FrameLog>, ram: u64) -> Self {
         let cache_split = split(cache_budget_bytes(ram, None));
         Self {
             registry: Arc::new(Registry::with_builtin()),
@@ -117,6 +117,7 @@ impl PhotosortApp {
             grid_layout: layout(FIRST_FRAME_WIDTH, DEFAULT_TILE, SPACING, CAPTION),
             waker,
             frame_log,
+            painted: false,
         }
     }
 
@@ -284,30 +285,21 @@ impl PhotosortApp {
 
     /// Arrow keys, Space and Enter. Nothing happens while a text field has
     /// the keyboard, so typing never triggers a grid action.
+    ///
+    /// Every key press in the frame counts, in the order it arrived. Arrows
+    /// are applied once per press. Space toggles the same range on each press,
+    /// so only its parity matters: two presses cancel, as they would over two
+    /// frames. Enter opens once, since a second open of the same shot in the
+    /// same frame changes nothing.
     fn handle_keys(&mut self, ctx: &egui::Context) -> Option<GridAction> {
         if ctx.egui_wants_keyboard_input() {
             return None;
         }
-        let (moves, toggle, open) = ctx.input_mut(|input| {
-            let mut moves = Vec::new();
-            let arrows = [
-                (egui::Key::ArrowLeft, Move::Left),
-                (egui::Key::ArrowRight, Move::Right),
-                (egui::Key::ArrowUp, Move::Up),
-                (egui::Key::ArrowDown, Move::Down),
-            ];
-            for (key, mv) in arrows {
-                // Shift first: a NONE match ignores an extra Shift, so checking
-                // NONE first would swallow Shift+arrow.
-                if input.consume_key(egui::Modifiers::SHIFT, key) {
-                    moves.push((mv, true));
-                } else if input.consume_key(egui::Modifiers::NONE, key) {
-                    moves.push((mv, false));
-                }
-            }
-            let toggle = input.consume_key(egui::Modifiers::NONE, egui::Key::Space);
+        let (moves, toggles, open) = ctx.input_mut(|input| {
+            let moves = consume_arrow_presses(&mut input.events);
+            let toggles = input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::Space);
             let open = input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
-            (moves, toggle, open)
+            (moves, toggles, open)
         });
         for (mv, extend) in moves {
             self.selection = apply_move(
@@ -319,7 +311,7 @@ impl PhotosortApp {
             );
             self.reveal_focus();
         }
-        if toggle {
+        if toggles % 2 == 1 {
             let targets: Vec<ShotId> = selected_range(self.selection)
                 .filter_map(|position| self.order.get(position).copied())
                 .collect();
@@ -349,8 +341,9 @@ impl PhotosortApp {
         }
     }
 
-    /// Applies folder picks, scan events and uploads, then keys. Runs before `ui`.
-    fn frame_logic(&mut self, ctx: &egui::Context, cpu_seconds: Option<f32>) {
+    /// Applies folder picks, scan events and uploads, then keys. Runs before
+    /// `ui`. Returns the events applied and the textures uploaded.
+    fn frame_logic(&mut self, ctx: &egui::Context) -> (usize, usize) {
         self.drain_folder_pick();
         let (events, more_events) = self.drain_events();
         let uploads = self.upload_textures(ctx);
@@ -361,18 +354,31 @@ impl PhotosortApp {
         if more_events || !self.pending_images.is_empty() {
             ctx.request_repaint();
         }
+        (events, uploads)
+    }
+
+    /// Writes a frame line for a drawn frame. A frame that `ui` did not draw
+    /// has no CPU time of its own, so it writes nothing.
+    fn log_frame(&self, painted: bool, cpu_seconds: Option<f32>, events: usize, uploads: usize) {
+        if !painted {
+            return;
+        }
         if let Some(log) = &self.frame_log {
-            frame_log::send(log, frame_log::frame_line(cpu_seconds, events, uploads));
+            log.send(frame_log::frame_line(cpu_seconds, events, uploads));
         }
     }
 }
 
 impl eframe::App for PhotosortApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.frame_logic(ctx, frame.info().cpu_usage);
+        // The flag is read here, so it describes the `ui` pass before this one.
+        let painted = std::mem::take(&mut self.painted);
+        let (events, uploads) = self.frame_logic(ctx);
+        self.log_frame(painted, frame.info().cpu_usage, events, uploads);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.painted = true;
         let bar = egui::Panel::top("top_bar").show(ui, |ui| top_bar::show(ui, self));
         match bar.inner {
             TopBarAction::None => {}
@@ -389,6 +395,47 @@ impl eframe::App for PhotosortApp {
         if let Some(action) = action {
             self.handle_action(action);
         }
+    }
+}
+
+/// Removes every arrow press from `events` and returns them in order, each
+/// with whether Shift extends the selection. Shift is checked first: a plain
+/// arrow match ignores an extra Shift, so checking it first would swallow
+/// Shift+arrow.
+fn consume_arrow_presses(events: &mut Vec<egui::Event>) -> Vec<(Move, bool)> {
+    let mut moves = Vec::new();
+    events.retain(|event| {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = event
+        else {
+            return true;
+        };
+        let Some(mv) = arrow_move(*key) else {
+            return true;
+        };
+        if modifiers.matches_logically(egui::Modifiers::SHIFT) {
+            moves.push((mv, true));
+        } else if modifiers.matches_logically(egui::Modifiers::NONE) {
+            moves.push((mv, false));
+        } else {
+            return true;
+        }
+        false
+    });
+    moves
+}
+
+fn arrow_move(key: egui::Key) -> Option<Move> {
+    match key {
+        egui::Key::ArrowLeft => Some(Move::Left),
+        egui::Key::ArrowRight => Some(Move::Right),
+        egui::Key::ArrowUp => Some(Move::Up),
+        egui::Key::ArrowDown => Some(Move::Down),
+        _ => None,
     }
 }
 
@@ -724,5 +771,178 @@ mod tests {
         app.start_scan(dir.path().to_path_buf());
         pump_until(&mut app, |app| app.phase == Phase::Done);
         assert!(calls.load(Ordering::SeqCst) > 0);
+    }
+
+    /// An app over `len` shots in one column, so Right and Down step by one.
+    fn app_with_order(len: u32) -> PhotosortApp {
+        let mut app = app();
+        app.order = (0..len).map(ShotId).collect();
+        app.grid_layout.columns = 1;
+        app
+    }
+
+    fn key_press(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// Runs one egui pass whose input is `events`, and handles its keys.
+    /// Returns the action the keys produced.
+    fn press_keys(app: &mut PhotosortApp, events: Vec<egui::Event>) -> Option<GridAction> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut action = None;
+        let mut output = ctx.run_ui(input, |_ui| action = app.handle_keys(&ctx));
+        // epaint asserts in debug builds that texture changes are handled. The
+        // test makes none, so clearing is the handling.
+        output.textures_delta.clear();
+        action
+    }
+
+    #[test]
+    fn shift_arrow_extends_the_selection_and_a_plain_arrow_clears_it() {
+        let mut app = app_with_order(3);
+        press_keys(
+            &mut app,
+            vec![key_press(egui::Key::ArrowRight, egui::Modifiers::SHIFT)],
+        );
+        assert_eq!(
+            app.selection,
+            Selection {
+                focus: 1,
+                anchor: Some(0)
+            }
+        );
+
+        press_keys(
+            &mut app,
+            vec![key_press(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+        );
+        assert_eq!(
+            app.selection,
+            Selection {
+                focus: 2,
+                anchor: None
+            }
+        );
+    }
+
+    #[test]
+    fn every_arrow_press_in_one_frame_moves_the_focus() {
+        let mut app = app_with_order(5);
+        let right = key_press(egui::Key::ArrowRight, egui::Modifiers::NONE);
+        press_keys(&mut app, vec![right; 3]);
+        assert_eq!(app.selection.focus, 3);
+    }
+
+    #[test]
+    fn a_mixed_run_of_arrows_keeps_its_order() {
+        // Shift+Right then plain Right: the range is started, then cleared.
+        let mut app = app_with_order(5);
+        press_keys(
+            &mut app,
+            vec![
+                key_press(egui::Key::ArrowRight, egui::Modifiers::SHIFT),
+                key_press(egui::Key::ArrowRight, egui::Modifiers::NONE),
+            ],
+        );
+        assert_eq!(
+            app.selection,
+            Selection {
+                focus: 2,
+                anchor: None
+            }
+        );
+    }
+
+    /// Two Space presses in one frame cancel, as they would over two frames.
+    /// Three toggle once.
+    #[test]
+    fn space_presses_in_one_frame_toggle_by_parity() {
+        let mut app = app_with_order(3);
+        let space = || key_press(egui::Key::Space, egui::Modifiers::NONE);
+        press_keys(&mut app, vec![space(), space()]);
+        assert!(app.ticks.is_empty(), "two presses cancel");
+
+        press_keys(&mut app, vec![space(), space(), space()]);
+        assert_eq!(app.ticks, HashSet::from([ShotId(0)]));
+    }
+
+    #[test]
+    fn enter_pressed_twice_in_one_frame_opens_the_focused_shot_once() {
+        let mut app = app_with_order(3);
+        let enter = key_press(egui::Key::Enter, egui::Modifiers::NONE);
+        let action = press_keys(&mut app, vec![enter; 2]);
+        assert_eq!(action, Some(GridAction::Open(ShotId(0))));
+    }
+
+    #[test]
+    fn upload_textures_uploads_at_most_eight_per_frame() {
+        let mut app = app();
+        for i in 0..20 {
+            app.pending_images.push_back((
+                ShotId(i),
+                DecodedImage {
+                    size: [1, 1],
+                    rgba: vec![0; 4],
+                },
+            ));
+        }
+        let ctx = egui::Context::default();
+
+        let uploaded = app.upload_textures(&ctx);
+
+        assert_eq!(uploaded, 8);
+        assert_eq!(app.textures.len(), 8);
+        assert_eq!(app.pending_images.len(), 12);
+    }
+
+    #[test]
+    fn drain_events_stops_at_5000_and_leaves_the_rest_queued() {
+        let mut app = app();
+        app.generation = 1;
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..6000 {
+            // A stale generation, so each event is a no-op and only the count matters.
+            tx.send(ScanEvent::ParsePassDone { generation: 0 })
+                .expect("queue is open");
+        }
+        app.events = Some(rx);
+
+        let (applied, more) = app.drain_events();
+
+        assert_eq!(applied, 5000);
+        assert!(more, "more events are waiting");
+        let rest = app.events.as_ref().expect("the scan is still running");
+        assert_eq!(rest.try_iter().count(), 1000);
+    }
+
+    /// Only a drawn frame writes a line. A hidden frame has no CPU time of its own.
+    #[test]
+    fn only_a_drawn_frame_writes_a_log_line() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("frames.log");
+        let (log, writer) = frame_log::spawn(&path).expect("the file opens");
+        let waker: Waker = Arc::new(|| {});
+        let app = PhotosortApp::build(waker, Some(log), FALLBACK);
+
+        app.log_frame(false, Some(0.5), 1, 1);
+        app.log_frame(true, None, 2, 3);
+        app.log_frame(true, Some(0.0123), 4, 5);
+        drop(app);
+
+        writer.join().expect("the writer ends");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the log is readable"),
+            "- 2 3\n12.3 4 5\n# dropped 0\n"
+        );
     }
 }

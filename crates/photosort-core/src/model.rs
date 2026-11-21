@@ -43,7 +43,9 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
     a
 }
 
-/// A byte range in a file, guaranteed non-empty and inside the file.
+/// A byte range in a file. `ByteRange::within` is the only constructor that
+/// checks the range: it is non-empty and inside the file. The fields are
+/// public, so a range built by hand may not satisfy that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ByteRange {
     pub offset: u64,
@@ -58,10 +60,11 @@ impl ByteRange {
         (len > 0 && end <= file_len).then_some(ByteRange { offset, len })
     }
 
+    /// One past the last byte. Saturates at `u64::MAX` for a hand-built range
+    /// whose sum overflows, so this never panics in a debug build.
     #[must_use]
     pub fn end(&self) -> u64 {
-        // Cannot overflow: `within` checked it.
-        self.offset + self.len
+        self.offset.saturating_add(self.len)
     }
 }
 
@@ -127,4 +130,40 @@ pub enum ParseError {
     WrongFormat { expected: &'static str },
     #[error("malformed {what}")]
     Malformed { what: &'static str },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn within_accepts_a_range_that_ends_exactly_at_the_file_end() {
+        assert_eq!(
+            ByteRange::within(10, 5, 15),
+            Some(ByteRange { offset: 10, len: 5 })
+        );
+        assert_eq!(ByteRange::within(10, 6, 15), None);
+        assert_eq!(ByteRange::within(10, 0, 15), None);
+    }
+
+    #[test]
+    fn within_rejects_a_range_whose_end_overflows() {
+        assert_eq!(ByteRange::within(u64::MAX - 1, 2, u64::MAX), None);
+    }
+
+    /// The fields are public, so `end` must not panic on a hand-built range
+    /// whose sum overflows.
+    #[test]
+    fn end_saturates_instead_of_overflowing_on_a_hand_built_range() {
+        let range = ByteRange {
+            offset: u64::MAX,
+            len: 2,
+        };
+        assert_eq!(range.end(), u64::MAX);
+        let max = ByteRange {
+            offset: u64::MAX - 4,
+            len: 4,
+        };
+        assert_eq!(max.end(), u64::MAX);
+    }
 }

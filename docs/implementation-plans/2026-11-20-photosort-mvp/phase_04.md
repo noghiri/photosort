@@ -112,7 +112,7 @@ pub(crate) fn load_full(path: &Path, source: &FullSource, target: Option<[u32; 2
 ```
 
 `decode_full`:
-1. `jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes))`, then `read_info()`.
+1. `jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes))`, then `read_info()`. Then read `info()` and return `Err(PreviewError::Decode(image::ImageError::Limits(image::error::LimitErrorKind::DimensionError.into())))` if its width or height is greater than `DECODE_MAX_SIDE` (16,384). That constant is private to `preview.rs`, and `decode_full` lives in the same file, so it can use it directly. This check is the only dimension limit on this path. Do not rely on `jpeg-decoder` to enforce one, and do not rely on `decode_limits()`, which `decode_full` does not use.
 2. If `target` is set, swap its axes for orientations 5-8 (they rotate 90°), then call `decoder.scale(w, h)` with values clamped to `u16`.
 3. `decode()`, then convert by `info().pixel_format`:
    - `RGB24` → RGB;
@@ -134,6 +134,7 @@ It then calls `decode_full`. A `PreviewOnly` source ignores `target` (it is alre
 - Orientation 6 with target `[200, 300]` → 200×300.
 - AC3.4: `load_full` on a NEF-only temp file with `Embedded` → the JpgFromRaw size (1200×800 in the fixture).
 - AC3.6: corrupt bytes, or a range past EOF → `Err`, no panic.
+- `tiny_jpeg(DECODE_MAX_SIDE + 1, 8)` → `Err` from `decode_full` before any pixel decoding. The image is 8 px high (about 16k × 8 pixels), so the test stays cheap.
 - AC3.6: a `tiny_jpeg` whose SOS marker (`FF DA`) is overwritten with `FF D9` → `decode_full` returns `Err` (the same corruption `gen_card` uses for `BRKN_0001.JPG` in Task 6).
 
 **Verification:** `cargo test -p photosort preview`

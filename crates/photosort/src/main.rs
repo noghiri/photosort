@@ -8,15 +8,11 @@ mod app;
 mod budget;
 #[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
 mod cache;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into the scanner in Task 6")
-)]
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
 mod preview;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into the scanner in Task 6")
-)]
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
+mod scan;
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into the app in Task 8"))]
 mod scan_queue;
 
 use eframe::egui;

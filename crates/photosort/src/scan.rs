@@ -1139,6 +1139,44 @@ mod tests {
         );
     }
 
+    /// The tile bound applies on the scan path, not only inside `decode_preview`.
+    /// A 2000 × 1500 embedded preview comes back fitted to 1280 × 960.
+    #[test]
+    fn a_requested_preview_larger_than_the_tile_bound_is_fitted() {
+        let dir: TempDir = tempdir().expect("temp dir");
+        write_file(
+            &dir.path().join("DSC_0001.JPG"),
+            &jpeg_file(
+                Order::Big,
+                Some(&ExifSpec::zf()),
+                None,
+                Some(&tiny_jpeg(2000, 1500)),
+            ),
+        );
+        let registry = Arc::new(Registry::with_builtin());
+        let (scanner, rx, _) = start_scan(dir.path(), Arc::clone(&registry));
+        let events = receive_until(&rx, is_parse_pass_done);
+
+        let mut shot = listed_shots(&events)[0].clone();
+        for (index, file) in shot.files.iter_mut().enumerate() {
+            if let Ok(meta) = &outcome_for(&events, shot.id, index).meta {
+                file.meta = Some(meta.clone());
+            }
+        }
+        let (index, range) = shot
+            .tile_preview(&registry)
+            .expect("the JPEG has an embedded preview");
+        let orientation = shot.files[index].meta.as_ref().and_then(|m| m.orientation);
+        scanner.set_visible(vec![shot.id]);
+        scanner.request_preview(shot.id, shot.files[index].path.clone(), range, orientation);
+
+        let mut events = receive_until(&rx, |e| matches!(e, ScanEvent::Preview { .. }));
+        let Some(ScanEvent::Preview { result, .. }) = events.pop() else {
+            panic!("the last event is a Preview");
+        };
+        assert_eq!(result.expect("the preview decodes").size, [1280, 960]);
+    }
+
     #[test]
     fn every_event_is_followed_by_a_wake() {
         let dir = tempdir().expect("temp dir");

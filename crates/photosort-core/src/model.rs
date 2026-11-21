@@ -96,6 +96,25 @@ pub struct Metadata {
     pub full_jpeg: Option<ByteRange>,
 }
 
+/// EXIF lets an unknown date or subsecond be filled with spaces, so a value
+/// counts only when it has an ASCII digit. Grouping and identity both read
+/// the capture time through these, so a blank value is undated in each.
+impl Metadata {
+    /// `DateTimeOriginal`, when it holds a date.
+    pub fn capture_date(&self) -> Option<&str> {
+        has_digit(self.date_time_original.as_deref())
+    }
+
+    /// `SubSecTimeOriginal`, or `""` when it is absent or holds no digit.
+    pub fn capture_subsec(&self) -> &str {
+        has_digit(self.subsec_time_original.as_deref()).unwrap_or("")
+    }
+}
+
+fn has_digit(value: Option<&str>) -> Option<&str> {
+    value.filter(|text| text.bytes().any(|b| b.is_ascii_digit()))
+}
+
 /// Identity of a photo, independent of file name and lens edits.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IdentityKey {

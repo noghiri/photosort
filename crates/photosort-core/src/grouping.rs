@@ -105,11 +105,7 @@ impl Shot {
     pub fn capture_time(&self) -> Option<(&str, &str)> {
         self.files.iter().find_map(|file| {
             let meta = file.meta.as_ref()?;
-            let dto = meta
-                .date_time_original
-                .as_deref()
-                .filter(|s| !s.is_empty())?;
-            Some((dto, meta.subsec_time_original.as_deref().unwrap_or("")))
+            Some((meta.capture_date()?, meta.capture_subsec()))
         })
     }
 
@@ -424,6 +420,29 @@ mod tests {
         ];
         let order = capture_order(&shots);
         assert_eq!(names(&shots, &order), vec!["dated.jpg", "blank.jpg"]);
+    }
+
+    /// EXIF lets an unknown date be blank-filled. Blank text is undated, so
+    /// such a shot sorts with the undated ones, not before the dated ones.
+    #[test]
+    fn a_blank_filled_dto_counts_as_undated() {
+        let shots = vec![
+            dated_at(0, "blank.jpg", "                   ", "00"),
+            dated_at(1, "dated.jpg", "2026:11:20 10:00:00", "00"),
+            dated_at(2, "empty.jpg", "", "00"),
+        ];
+        let order = capture_order(&shots);
+        assert_eq!(
+            names(&shots, &order),
+            vec!["dated.jpg", "blank.jpg", "empty.jpg"]
+        );
+        assert_eq!(shots[0].capture_time(), None);
+    }
+
+    #[test]
+    fn a_blank_subsec_reads_as_absent() {
+        let shot = dated_at(0, "a.jpg", "2026:11:20 10:00:00", "   ");
+        assert_eq!(shot.capture_time(), Some(("2026:11:20 10:00:00", "")));
     }
 
     #[test]

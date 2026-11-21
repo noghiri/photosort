@@ -31,17 +31,13 @@ fn present(value: &Option<String>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn subsec(meta: &Metadata) -> String {
-    present(&meta.subsec_time_original).unwrap_or_default()
-}
-
 fn counter_key(meta: &Metadata) -> Option<IdentityKey> {
     Some(IdentityKey::Counter {
         make: present(&meta.make)?,
         serial: present(&meta.serial)?,
         counter: meta.shot_counter?,
-        dto: present(&meta.date_time_original)?,
-        subsec: subsec(meta),
+        dto: meta.capture_date()?.to_owned(),
+        subsec: meta.capture_subsec().to_owned(),
     })
 }
 
@@ -50,8 +46,8 @@ fn capture_key(meta: &Metadata) -> Option<IdentityKey> {
     Some(IdentityKey::Capture {
         make: present(&meta.make)?,
         serial: present(&meta.serial).unwrap_or_default(),
-        dto: present(&meta.date_time_original)?,
-        subsec: subsec(meta),
+        dto: meta.capture_date()?.to_owned(),
+        subsec: meta.capture_subsec().to_owned(),
         iso: meta.iso?,
         exposure: exposure.reduced(),
     })
@@ -537,6 +533,56 @@ mod tests {
             key_of(jpeg::KIND, &file),
             IdentityKey::Content { .. }
         ));
+    }
+
+    /// A Nikon-like body whose DateTimeOriginal is blank-filled. Every field
+    /// the counter and capture rungs need is present except a real date.
+    fn blank_dto_meta(dto: &str) -> Metadata {
+        Metadata {
+            make: Some("NIKON CORPORATION".to_owned()),
+            serial: Some("1234567".to_owned()),
+            shot_counter: Some(75036),
+            date_time_original: Some(dto.to_owned()),
+            iso: Some(800),
+            exposure_time: Some(Rational { num: 1, den: 250 }),
+            ..Metadata::default()
+        }
+    }
+
+    /// EXIF lets an unknown date be blank-filled. A blank DTO is not a date,
+    /// so neither the counter rung nor the capture rung applies.
+    #[test]
+    fn a_blank_filled_dto_skips_the_counter_and_capture_rungs() {
+        let meta = blank_dto_meta("                   ");
+        assert!(matches!(
+            identity_for(Some(&meta), 10, b"head"),
+            IdentityKey::Content { .. }
+        ));
+    }
+
+    /// Two different undated shots from the same body must not share a
+    /// capture key. Both fall to the content rung, which tells them apart.
+    #[test]
+    fn two_undated_shots_with_blank_dtos_keep_distinct_identities() {
+        let meta = blank_dto_meta("   ");
+        assert_ne!(
+            identity_for(Some(&meta), 10, b"first shot"),
+            identity_for(Some(&meta), 10, b"second shot")
+        );
+    }
+
+    /// A blank subsecond is the same as an absent one, so both key alike.
+    #[test]
+    fn a_blank_subsec_keys_like_an_absent_one() {
+        let absent = blank_dto_meta("2026:11:20 14:59:32");
+        let blank = Metadata {
+            subsec_time_original: Some("   ".to_owned()),
+            ..absent.clone()
+        };
+        assert_eq!(
+            identity_for(Some(&blank), 10, b"head"),
+            identity_for(Some(&absent), 10, b"head")
+        );
     }
 
     #[test]

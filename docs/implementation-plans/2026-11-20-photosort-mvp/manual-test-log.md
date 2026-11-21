@@ -12,7 +12,17 @@ Results of manual and opt-in checks, one section per phase. Later phases append 
 
 ## Phase 3
 
-- Pending: no manual checks recorded yet.
+Task 10, 2026-11-21, by the user. Synthetic card from `gen_card` (7,000 shots, 7,705 files including the 5 edge-case files), release build, Windows 11.
+
+- **AC9.1** (placeholders within 3 s): **Pass** by eye (not stopwatch-timed). `list_source` over 7,000 files measured about 40 ms in the automated test.
+- **AC1.3** (edge files): **Pass.** `.MOV` and `.xmp` absent; `TRUNC_0001.JPG` and `EMPTY_0001.NEF` show "⚠ unreadable".
+- **AC9.2** (frame times while the parse pass runs, scrolling and ticking): **Pass.** 5,180 frame lines, maximum 30.4 ms (limit 100 ms), trailer `# dropped 0`.
+- **AC2.5 / AC2.6** (keyboard): **Pass.** Arrows move the focus ring and the grid follows; Shift+arrows extend the range; Space ticks or unticks the whole range.
+  - Observed: pressing Space while holding an arrow key stops the repeat-scroll. Accepted by the user.
+  - Observed: Shift+click does not extend the selection. Not a requirement (AC2.6 specifies Shift+arrows); noted for possible later work.
+- **AC2.7** (tile slider and Ctrl+scroll resize, column reflow, Ctrl+scroll does not zoom the UI) and the checkbox-then-Space double-toggle check: not reported in this run.
+- **AC2.2 / AC2.3 / AC2.8** (badges and previews): **Pass.** JPEG-only tiles show `J` with a preview; `DSC_0010` shows `J+N`; `NOPV_0001.JPG` shows a name-only placeholder; after deleting `DSC_0010.JPG` and rescanning, the `N` tile shows its preview.
+- **AC2.1** (capture order after the pass): **Pass.**
 
 ## Phase 4
 

@@ -253,6 +253,75 @@ mod tests {
         }
     }
 
+    /// Offset of the MPF TIFF header: the first `MPF\0` marker payload plus 4.
+    fn mpf_tiff_base(file: &[u8]) -> usize {
+        file.windows(4)
+            .position(|w| w == b"MPF\0")
+            .expect("MPF APP2 is written")
+            + 4
+    }
+
+    #[test]
+    fn maker_note_preview_is_kept_when_there_is_no_mpf() {
+        let preview = tiny_jpeg(640, 424);
+        let nikon = NikonSpec {
+            preview_jpeg: Some(preview.clone()),
+            preview_inside: true,
+            ..NikonSpec::zf(None)
+        };
+        for order in [Order::Little, Order::Big] {
+            let file = jpeg_file(order, Some(&ExifSpec::zf()), Some(&nikon), None);
+            let range = read_jpeg(&file)
+                .unwrap()
+                .preview
+                .expect("maker-note preview located");
+            let bytes = slice(&file, range);
+            assert_eq!(bytes, preview.as_slice(), "order {order:?}");
+            assert_eq!(decoded_size(bytes), (640, 424));
+        }
+    }
+
+    #[test]
+    fn maker_note_preview_is_kept_when_the_mpf_index_is_broken() {
+        let note_preview = tiny_jpeg(640, 424);
+        let mpf_preview = tiny_jpeg(320, 212);
+        let nikon = NikonSpec {
+            preview_jpeg: Some(note_preview.clone()),
+            preview_inside: true,
+            ..NikonSpec::zf(None)
+        };
+        for order in [Order::Little, Order::Big] {
+            let mut file = jpeg_file(
+                order,
+                Some(&ExifSpec::zf()),
+                Some(&nikon),
+                Some(&mpf_preview),
+            );
+
+            // Intact MPF: its preview wins over the maker-note preview.
+            let intact = read_jpeg(&file)
+                .unwrap()
+                .preview
+                .expect("MPF preview located");
+            assert_eq!(
+                decoded_size(slice(&file, intact)),
+                (320, 212),
+                "order {order:?}"
+            );
+
+            // An IFD entry count above the walker's limit breaks the MPF index.
+            let base = mpf_tiff_base(&file);
+            file[base + 8..base + 10].copy_from_slice(&[0xFF, 0xFF]);
+            let range = read_jpeg(&file)
+                .unwrap()
+                .preview
+                .expect("maker-note preview kept");
+            let bytes = slice(&file, range);
+            assert_eq!(bytes, note_preview.as_slice(), "order {order:?}");
+            assert_eq!(decoded_size(bytes), (640, 424));
+        }
+    }
+
     #[test]
     fn jpeg_without_app1_or_app2_has_default_metadata() {
         let file = jpeg_file(Order::Little, None, None, None);

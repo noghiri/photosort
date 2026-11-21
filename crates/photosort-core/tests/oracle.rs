@@ -39,7 +39,9 @@ use std::process::Command;
 use photosort_core::identity::identity_for;
 use photosort_core::metadata::Registry;
 use photosort_core::model::{ByteRange, IdentityKey, Metadata, ParseError, Rational};
-use photosort_testkit::{ExifSpec, NikonSpec, Order, jpeg_file, nef_file, tiny_jpeg};
+use photosort_testkit::{
+    ExifSpec, NikonSpec, Order, jpeg_file, jpeg_file_with_mpf_order, nef_file, tiny_jpeg,
+};
 use serde_json::{Map, Value};
 
 /// ExifTool is called with at most this many files per process.
@@ -254,6 +256,17 @@ fn synthetic_cases() -> Vec<(&'static str, Vec<u8>, Expectations)> {
             "jpeg-be-note-mpf.jpg",
             jpeg_file(
                 Order::Big,
+                Some(&exif),
+                Some(&NikonSpec::zf(None)),
+                Some(&preview),
+            ),
+            jpeg_mpf,
+        ),
+        (
+            "jpeg-be-note-mpf-le.jpg",
+            jpeg_file_with_mpf_order(
+                Order::Big,
+                Order::Little,
                 Some(&exif),
                 Some(&NikonSpec::zf(None)),
                 Some(&preview),

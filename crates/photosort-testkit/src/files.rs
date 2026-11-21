@@ -93,6 +93,20 @@ pub fn jpeg_file(
     nikon: Option<&NikonSpec>,
     mpf_preview: Option<&[u8]>,
 ) -> Vec<u8> {
+    jpeg_file_with_mpf_order(order, Order::Big, exif, nikon, mpf_preview)
+}
+
+/// As `jpeg_file`, with the MPF TIFF in `mpf_order`. `jpeg_file` writes a
+/// big-endian MPF block; this lets a test write a little-endian one, and
+/// with a byte order that differs from the Exif block's.
+#[must_use]
+pub fn jpeg_file_with_mpf_order(
+    order: Order,
+    mpf_order: Order,
+    exif: Option<&ExifSpec>,
+    nikon: Option<&NikonSpec>,
+    mpf_preview: Option<&[u8]>,
+) -> Vec<u8> {
     let body = tiny_jpeg(16, 16)[2..].to_vec();
     let app1 = exif
         .map(|e| segment(0xE1, &exif_payload(order, e, nikon)))
@@ -103,7 +117,7 @@ pub fn jpeg_file(
 
     if let Some(preview) = mpf_preview {
         // Pass 1: the MPF block's length does not depend on its offsets.
-        let zero_block = mpf_block(0, 0, 0);
+        let zero_block = mpf_block(mpf_order, 0, 0, 0);
         let app2_len = 2 + 2 + 4 + zero_block.len();
         let primary_len = 2 + app1.len() + app2_len + body.len();
         // Offsets are measured from the MM byte: APP2 marker, length and "MPF\0" come first.
@@ -111,6 +125,7 @@ pub fn jpeg_file(
         let rel = primary_len - mm_pos;
         let mut app2_payload = b"MPF\0".to_vec();
         app2_payload.extend(mpf_block(
+            mpf_order,
             count(primary_len),
             count(preview.len()),
             count(rel),
@@ -209,24 +224,31 @@ fn segment(marker: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The MPF TIFF (big-endian). Its primary entry names the primary image
+/// The MPF TIFF in `order`. Its primary entry names the primary image
 /// and its preview entry names the appended preview at `preview_rel`.
-fn mpf_block(primary_len: u32, preview_len: u32, preview_rel: u32) -> Vec<u8> {
+fn mpf_block(order: Order, primary_len: u32, preview_len: u32, preview_rel: u32) -> Vec<u8> {
     // Each MP entry is 16 bytes (phase plan Task 7: N x 16-byte entries in a
     // 32-byte 0xB002 for two images): attribute, size, offset, then two
     // 16-bit dependent-image offsets, which are zero here.
     let mut index = Vec::with_capacity(32);
     for v in [0x0003_0000, primary_len, 0, 0] {
-        index.extend(v.to_be_bytes());
+        index.extend(enc32(order, v));
     }
     for v in [0x0001_0001, preview_len, preview_rel, 0] {
-        index.extend(v.to_be_bytes());
+        index.extend(enc32(order, v));
     }
     let ifd0 = IfdBuilder::new()
         .undefined(0xB000, b"0100")
         .long(0xB001, &[2])
         .undefined(0xB002, &index);
-    write_tiff(Order::Big, TIFF_MAGIC, &ifd0, 0).bytes
+    write_tiff(order, TIFF_MAGIC, &ifd0, 0).bytes
+}
+
+fn enc32(order: Order, v: u32) -> [u8; 4] {
+    match order {
+        Order::Little => v.to_le_bytes(),
+        Order::Big => v.to_be_bytes(),
+    }
 }
 
 /// Standard IFD0 fields shared by every file kind.

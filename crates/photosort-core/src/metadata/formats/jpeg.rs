@@ -209,7 +209,9 @@ mod tests {
     use crate::metadata::makernotes::nikon::NikonMakerNotes;
     use crate::metadata::registry::MakerNoteReader;
     use crate::metadata::test_support::{decoded_size, expected_zf, slice};
-    use photosort_testkit::{ExifSpec, NikonSpec, Order, jpeg_file, tiff_file, tiny_jpeg};
+    use photosort_testkit::{
+        ExifSpec, NikonSpec, Order, jpeg_file, jpeg_file_with_mpf_order, tiff_file, tiny_jpeg,
+    };
 
     fn read_jpeg(file: &[u8]) -> Result<Metadata, ParseError> {
         let makernotes: Vec<Box<dyn MakerNoteReader>> = vec![Box::new(NikonMakerNotes)];
@@ -319,6 +321,36 @@ mod tests {
             let bytes = slice(&file, range);
             assert_eq!(bytes, note_preview.as_slice(), "order {order:?}");
             assert_eq!(decoded_size(bytes), (640, 424));
+        }
+    }
+
+    /// The MPF index is read in the MPF TIFF's own byte order, whatever the
+    /// Exif block uses. A reader hard-coded to big-endian fails the
+    /// little-endian MPF cases.
+    #[test]
+    fn mpf_preview_is_read_in_the_mpf_byte_order_not_the_exif_order() {
+        let preview = tiny_jpeg(640, 424);
+        for order in [Order::Little, Order::Big] {
+            for mpf_order in [Order::Little, Order::Big] {
+                let file = jpeg_file_with_mpf_order(
+                    order,
+                    mpf_order,
+                    Some(&ExifSpec::zf()),
+                    None,
+                    Some(&preview),
+                );
+                let range = read_jpeg(&file)
+                    .unwrap()
+                    .preview
+                    .expect("MPF preview located");
+                let bytes = slice(&file, range);
+                assert_eq!(
+                    bytes,
+                    preview.as_slice(),
+                    "exif {order:?}, mpf {mpf_order:?}"
+                );
+                assert_eq!(decoded_size(bytes), (640, 424));
+            }
         }
     }
 

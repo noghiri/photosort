@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/photosort-core", "crates/photosort"]
+members = ["crates/photosort-core", "crates/photosort", "crates/photosort-testkit"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 photosort-core = { path = "crates/photosort-core" }
+photosort-testkit = { path = "crates/photosort-testkit" }
 eframe = "=0.37.0"
 blake3 = "=1.8.7"
 thiserror = "=2.0.21"

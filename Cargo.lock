@@ -2534,10 +2534,18 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "image",
+ "photosort-testkit",
  "proptest",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "photosort-testkit"
+version = "0.1.0"
+dependencies = [
+ "image",
 ]
 
 [[package]]

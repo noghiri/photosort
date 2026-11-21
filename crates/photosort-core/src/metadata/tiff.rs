@@ -7,7 +7,7 @@
 //! that but inside the file returns `ParseError::NeedMore`.
 // pattern: Functional Core
 
-use crate::model::{ParseError, Rational};
+use crate::model::{ByteRange, ParseError, Rational};
 
 /// TIFF/EXIF/NEF magic number.
 pub const TIFF_MAGIC: u16 = 42;
@@ -16,7 +16,7 @@ const MAX_IFD_ENTRIES: u16 = 1024;
 /// Upper bound on values decoded from one entry.
 const MAX_VALUES: u32 = 4096;
 
-const OVERFLOW: ParseError = ParseError::Malformed {
+pub(crate) const OVERFLOW: ParseError = ParseError::Malformed {
     what: "offset overflow",
 };
 
@@ -109,18 +109,7 @@ impl<'a> Tiff<'a> {
 
     /// `len` bytes at absolute offset `abs`.
     pub fn bytes(&self, abs: u64, len: u64) -> Result<&'a [u8], ParseError> {
-        let end = abs.checked_add(len).ok_or(OVERFLOW)?;
-        if end > self.file_len {
-            return Err(ParseError::Malformed {
-                what: "offset past end of file",
-            });
-        }
-        let have = self.head.len() as u64;
-        if end > have {
-            return Err(ParseError::NeedMore { needed: end, have });
-        }
-        // Both values fit in usize because end <= head.len().
-        self.head.get(abs as usize..end as usize).ok_or(OVERFLOW)
+        bytes_within(self.head, self.file_len, abs, len)
     }
 
     pub fn u16_at(&self, abs: u64) -> Result<u16, ParseError> {
@@ -294,6 +283,56 @@ pub fn optional<T>(result: Result<T, ParseError>) -> Result<Option<T>, ParseErro
         Err(e @ ParseError::NeedMore { .. }) => Err(e),
         Err(_) => Ok(None),
     }
+}
+
+/// `len` bytes at absolute file offset `abs`, for structures that are not
+/// TIFFs (a maker-note header, a JPEG marker). Same semantics as `Tiff::bytes`.
+pub fn bytes_within(head: &[u8], file_len: u64, abs: u64, len: u64) -> Result<&[u8], ParseError> {
+    let end = abs.checked_add(len).ok_or(OVERFLOW)?;
+    if end > file_len {
+        return Err(ParseError::Malformed {
+            what: "offset past end of file",
+        });
+    }
+    let have = u64::try_from(head.len()).map_err(|_| OVERFLOW)?;
+    if end > have {
+        return Err(ParseError::NeedMore { needed: end, have });
+    }
+    // Both values fit in usize because end <= head.len().
+    head.get(abs as usize..end as usize).ok_or(OVERFLOW)
+}
+
+/// Reads the value of `tag` in `ifd`. `None` when the tag is absent or its
+/// value is malformed; `NeedMore` still propagates.
+pub fn optional_tag<T>(
+    ifd: &Ifd,
+    tag: u16,
+    read: impl FnOnce(&Entry) -> Result<T, ParseError>,
+) -> Result<Option<T>, ParseError> {
+    match ifd.get(tag) {
+        Some(entry) => optional(read(entry)),
+        None => Ok(None),
+    }
+}
+
+/// A byte range described by an offset tag and a length tag in the same
+/// IFD (Nikon PreviewIFD, NEF SubIFD JPEG). The offset is relative to the
+/// TIFF header. `None` if either tag is absent or the range is not inside
+/// the file.
+pub fn byte_range(
+    tiff: &Tiff<'_>,
+    ifd: &Ifd,
+    offset_tag: u16,
+    len_tag: u16,
+) -> Result<Option<ByteRange>, ParseError> {
+    let start = optional_tag(ifd, offset_tag, |e| {
+        e.first_u32(tiff).and_then(|rel| tiff.resolve(rel))
+    })?;
+    let len = optional_tag(ifd, len_tag, |e| e.first_u32(tiff))?;
+    Ok(match (start, len) {
+        (Some(start), Some(len)) => ByteRange::within(start, u64::from(len), tiff.file_len()),
+        _ => None,
+    })
 }
 
 #[cfg(test)]

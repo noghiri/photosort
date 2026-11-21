@@ -1,0 +1,20 @@
+# Rust build output
+/target/
+
+# Real camera samples: local-only, never committed (they carry camera serials and personal images)
+/samples/
+*.nef
+*.NEF
+*.orf
+*.ORF
+*.jpg
+*.JPG
+*.jpeg
+*.JPEG
+# Synthetic test fixtures are the only images allowed in the repo
+!/tests/fixtures/**
+!/crates/*/tests/fixtures/**
+
+# User lens profiles / config are never shipped
+photosort-config.json
+config.json

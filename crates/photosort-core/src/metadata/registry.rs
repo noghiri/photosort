@@ -8,8 +8,9 @@ use crate::metadata::makernotes::nikon::NikonMakerNotes;
 use crate::metadata::tiff::ByteOrder;
 use crate::model::{ByteRange, FileKind, Metadata, ParseError};
 
-/// Largest head the shell will ever read for metadata.
-pub const MAX_HEAD_LEN: u64 = 16 * 1024 * 1024;
+/// Defined in the TIFF walker, which enforces it; re-exported here so
+/// `registry::MAX_HEAD_LEN` and `metadata::MAX_HEAD_LEN` keep working.
+pub use crate::metadata::tiff::MAX_HEAD_LEN;
 
 pub struct ParseInput<'a> {
     /// The first bytes of the file (always starts at file offset 0).

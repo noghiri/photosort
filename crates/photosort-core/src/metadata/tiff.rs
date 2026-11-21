@@ -4,10 +4,15 @@
 //! Offsets stored inside a TIFF are relative to its header (`base`).
 //! Every position this module returns is an absolute file offset. Only
 //! the first `head.len()` bytes of the file are available; a read past
-//! that but inside the file returns `ParseError::NeedMore`.
+//! that but inside the file returns `ParseError::NeedMore`, unless the
+//! head it asks for would exceed `MAX_HEAD_LEN`, which is `Malformed`.
 // pattern: Functional Core
 
 use crate::model::{ByteRange, ParseError, Rational};
+
+/// Largest head the shell will ever read for metadata. `bytes_within` never
+/// asks for more, so a `NeedMore` is always satisfiable.
+pub const MAX_HEAD_LEN: u64 = 16 * 1024 * 1024;
 
 /// TIFF/EXIF/NEF magic number.
 pub const TIFF_MAGIC: u16 = 42;
@@ -287,6 +292,11 @@ pub fn optional<T>(result: Result<T, ParseError>) -> Result<Option<T>, ParseErro
 
 /// `len` bytes at absolute file offset `abs`, for structures that are not
 /// TIFFs (a maker-note header, a JPEG marker). Same semantics as `Tiff::bytes`.
+///
+/// A read past `head` returns `NeedMore` only while the head it asks for fits
+/// in `MAX_HEAD_LEN`. Past that the shell could never supply it, so the read
+/// is `Malformed`: a required structure then fails, and an optional field
+/// reads as absent (see `optional`).
 pub fn bytes_within(head: &[u8], file_len: u64, abs: u64, len: u64) -> Result<&[u8], ParseError> {
     let end = abs.checked_add(len).ok_or(OVERFLOW)?;
     if end > file_len {
@@ -296,6 +306,11 @@ pub fn bytes_within(head: &[u8], file_len: u64, abs: u64, len: u64) -> Result<&[
     }
     let have = u64::try_from(head.len()).map_err(|_| OVERFLOW)?;
     if end > have {
+        if end > MAX_HEAD_LEN {
+            return Err(ParseError::Malformed {
+                what: "offset past head limit",
+            });
+        }
         return Err(ParseError::NeedMore { needed: end, have });
     }
     // Both values fit in usize because end <= head.len().
@@ -642,5 +657,53 @@ mod tests {
             have: 4,
         };
         assert_eq!(optional::<u32>(Err(need.clone())), Err(need));
+    }
+
+    #[test]
+    fn read_past_head_limit_is_malformed_not_need_more() {
+        let head = [0u8; 16];
+        let file_len = MAX_HEAD_LEN + 1024;
+        // A read that ends exactly at the limit still asks for a head the shell can read.
+        assert_eq!(
+            bytes_within(&head, file_len, MAX_HEAD_LEN - 4, 4),
+            Err(ParseError::NeedMore {
+                needed: MAX_HEAD_LEN,
+                have: 16
+            })
+        );
+        // One byte further needs a head the shell can never read.
+        assert_eq!(
+            bytes_within(&head, file_len, MAX_HEAD_LEN - 3, 4),
+            Err(ParseError::Malformed {
+                what: "offset past head limit"
+            })
+        );
+        assert_eq!(
+            bytes_within(&head, file_len, MAX_HEAD_LEN + 10, 4),
+            Err(ParseError::Malformed {
+                what: "offset past head limit"
+            })
+        );
+    }
+
+    #[test]
+    fn far_offset_reads_optional_value_as_absent_and_fails_required_ifd() {
+        // An out-of-line ASCII value at 16 MiB + 10, in a file declared 1 KiB longer
+        // than the limit. Only the header and IFD0 are supplied.
+        let far = u32::try_from(MAX_HEAD_LEN + 10).unwrap();
+        let bytes = single_entry(false, 2, 10, u32e(false, far));
+        let file_len = MAX_HEAD_LEN + 1024;
+        let (tiff, ifd0) = Tiff::parse(&bytes, file_len, 0, &[TIFF_MAGIC]).unwrap();
+        let ifd = tiff.read_ifd(ifd0).unwrap();
+
+        let optional_value = optional_tag(&ifd, 0x0100, |e| e.ascii(&tiff));
+        assert_eq!(optional_value, Ok(None));
+
+        assert_eq!(
+            tiff.read_ifd(u64::from(far)).unwrap_err(),
+            ParseError::Malformed {
+                what: "offset past head limit"
+            }
+        );
     }
 }

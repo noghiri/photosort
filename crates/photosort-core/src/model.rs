@@ -118,7 +118,9 @@ pub enum IdentityKey {
 pub enum ParseError {
     /// The structure continues past the bytes supplied. `needed` is the
     /// smallest head length (from file start) that would let parsing
-    /// progress; it never exceeds the file length.
+    /// progress. It never exceeds the smaller of the file length and
+    /// `crate::metadata::MAX_HEAD_LEN`; a structure that would need more is
+    /// `Malformed` instead, so the shell can always satisfy a `NeedMore`.
     #[error("need the first {needed} bytes of the file, have {have}")]
     NeedMore { needed: u64, have: u64 },
     #[error("not a {expected} file")]

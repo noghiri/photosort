@@ -205,4 +205,52 @@ mod tests {
         let file = nef_file(Order::Big, &ExifSpec::zf(), None, None, 0);
         assert_eq!(read_nef(&file), expected_zf());
     }
+
+    /// Writes `value` into the value field of `tag` in the ExifIFD of a
+    /// little-endian NEF, so the entry points at `value`.
+    fn point_exif_entry_at(file: &mut [u8], tag: u16, value: u32) {
+        let len = u64::try_from(file.len()).unwrap();
+        let (tiff, ifd0_at) = Tiff::parse(file, len, 0, &[TIFF_MAGIC]).unwrap();
+        let ifd0 = tiff.read_ifd(ifd0_at).unwrap();
+        let exif_rel = ifd0.get(0x8769).unwrap().first_u32(&tiff).unwrap();
+        let exif_at = tiff.resolve(exif_rel).unwrap();
+        let exif = tiff.read_ifd(exif_at).unwrap();
+        let index = exif.entries.iter().position(|e| e.tag == tag).unwrap();
+        let field = exif_at + 2 + 12 * u64::try_from(index).unwrap() + 8;
+        let at = usize::try_from(field).unwrap();
+        file[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// LensModel points 40 MiB into a file declared 60 MiB long. The NEF bytes
+    /// themselves are the whole file, so the read past them is a head request
+    /// that no head the shell may read can satisfy. LensModel must read as
+    /// absent and every other field must survive.
+    #[test]
+    fn far_lens_model_offset_drops_only_lens_model() {
+        let mut file = nef_file(
+            Order::Little,
+            &ExifSpec::zf(),
+            Some(&NikonSpec::zf(None)),
+            None,
+            0,
+        );
+        point_exif_entry_at(&mut file, 0xA434, 40 * 1024 * 1024);
+        let makernotes: Vec<Box<dyn MakerNoteReader>> = vec![Box::new(NikonMakerNotes)];
+        let input = ParseInput {
+            head: &file,
+            file_len: 60 * 1024 * 1024,
+            makernotes: &makernotes,
+        };
+        let meta = NefReader
+            .parse(&input)
+            .expect("a far optional offset does not fail the parse");
+        assert_eq!(
+            meta,
+            Metadata {
+                lens_model: None,
+                shot_counter: Some(75036),
+                ..expected_zf()
+            }
+        );
+    }
 }

@@ -8,8 +8,8 @@
 use std::sync::OnceLock;
 
 use photosort_core::identity::identity_for;
-use photosort_core::metadata::Registry;
 use photosort_core::metadata::formats::{jpeg, nef};
+use photosort_core::metadata::{MAX_HEAD_LEN, Registry};
 use photosort_core::model::{ByteRange, FileKind, IdentityKey, Metadata, ParseError, Rational};
 use photosort_testkit::{ExifSpec, NikonSpec, Order, jpeg_file, nef_file, tiny_jpeg};
 use proptest::prelude::*;
@@ -95,6 +95,18 @@ fn assert_ranges_within(meta: &Metadata, file_len: u64) {
         assert!(
             range.end() <= file_len,
             "range {range:?} extends past the file length {file_len}"
+        );
+    }
+}
+
+/// A `NeedMore` must ask for a head the shell can read: no more than the file
+/// holds and no more than `MAX_HEAD_LEN`.
+fn assert_need_more_bounded(result: &Result<Metadata, ParseError>, file_len: u64) {
+    if let Err(ParseError::NeedMore { needed, .. }) = result {
+        let bound = file_len.min(MAX_HEAD_LEN);
+        assert!(
+            *needed <= bound,
+            "NeedMore {needed} exceeds min(file {file_len}, MAX_HEAD_LEN {MAX_HEAD_LEN})"
         );
     }
 }
@@ -201,7 +213,9 @@ proptest! {
     ) {
         let file_len = u64::try_from(head.len()).unwrap() + extra;
         for kind in [jpeg::KIND, nef::KIND] {
-            if let Ok(meta) = registry().parse(kind, &head, file_len) {
+            let result = registry().parse(kind, &head, file_len);
+            assert_need_more_bounded(&result, file_len);
+            if let Ok(meta) = result {
                 assert_ranges_within(&meta, file_len);
             }
         }
@@ -214,7 +228,9 @@ proptest! {
         (kind, bytes) in mutated_fixture(),
     ) {
         let file_len = u64::try_from(bytes.len()).unwrap();
-        if let Ok(meta) = registry().parse(kind, &bytes, file_len) {
+        let result = registry().parse(kind, &bytes, file_len);
+        assert_need_more_bounded(&result, file_len);
+        if let Ok(meta) = result {
             assert_ranges_within(&meta, file_len);
         }
     }
@@ -248,8 +264,8 @@ proptest! {
                         "step {step}: NeedMore {needed} does not pass head {k}"
                     );
                     prop_assert!(
-                        needed <= len,
-                        "step {step}: NeedMore {needed} exceeds file length {len}"
+                        needed <= len.min(MAX_HEAD_LEN),
+                        "step {step}: NeedMore {needed} exceeds min(file {len}, MAX_HEAD_LEN {MAX_HEAD_LEN})"
                     );
                     k = usize::try_from(needed).unwrap();
                 }
